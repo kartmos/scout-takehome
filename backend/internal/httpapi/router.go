@@ -10,19 +10,35 @@ type RouterConfig struct {
 	Logger         *slog.Logger
 	AllowedOrigins []string
 	// APIKey is used only inside middleware closures and is never logged or returned.
-	APIKey string
+	APIKey  string
+	Repo    photoRepository
+	Storage photoStorage
 }
 
-// NewRouter builds the HTTP handler with the production route set
-// (currently only GET /healthz) and the full middleware stack:
+// NewRouter builds the HTTP handler with the production route set and the full
+// middleware stack:
 //
 //	RequestID → AccessLogging → PanicRecovery → CORS → mux
 //
-// Auth middleware is not applied globally; it will be wired per-handler for
-// the three Data API operations. Panics if any required field in cfg is zero.
+// The three Data API routes are registered with Authenticate per-route.
+// /healthz and valid CORS preflights remain public.
+// Panics if any required field in cfg is zero/nil.
 func NewRouter(cfg RouterConfig) http.Handler {
+	if cfg.Repo == nil {
+		panic("httpapi: Repo is required")
+	}
+	if cfg.Storage == nil {
+		panic("httpapi: Storage is required")
+	}
+	auth := Authenticate(cfg.APIKey, cfg.Logger)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.Handle("POST /photos/{photoId}/upload-link",
+		auth(handleUploadLink(cfg.Repo, cfg.Storage, cfg.Logger)))
+	mux.Handle("GET /photos/{photoId}",
+		auth(handleGetPhoto(cfg.Repo, cfg.Storage, cfg.Logger)))
+	mux.Handle("GET /photos",
+		auth(handleListPhotos(cfg.Repo, cfg.Storage, cfg.Logger)))
 	return NewRouterWithMux(cfg, mux)
 }
 

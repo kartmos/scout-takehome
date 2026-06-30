@@ -33,6 +33,7 @@ type Config struct {
 	APIKey             string
 	CORSAllowedOrigins []string
 	HTTPMaxHeaderBytes int
+	DatabasePath       string
 }
 
 func Load() (*Config, error) {
@@ -86,6 +87,11 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	dbPath := strings.TrimSpace(os.Getenv("SCOUT_DATABASE_PATH"))
+	if dbPath == "" {
+		return nil, fmt.Errorf("SCOUT_DATABASE_PATH is required and must not be empty or whitespace-only")
+	}
+
 	return &Config{
 		HTTPAddr:              addr,
 		HTTPReadHeaderTimeout: readHeaderTimeout,
@@ -96,6 +102,7 @@ func Load() (*Config, error) {
 		APIKey:                apiKey,
 		CORSAllowedOrigins:    origins,
 		HTTPMaxHeaderBytes:    maxHeaderBytes,
+		DatabasePath:          dbPath,
 	}, nil
 }
 

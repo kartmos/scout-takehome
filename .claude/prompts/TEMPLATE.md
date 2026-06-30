@@ -49,17 +49,23 @@ Describe observable conditions that mean the task is complete.
 
 # Verification
 
-Separate focused iteration checks from the full final gate.
+State whether this is a code-only implementation stage or an explicit block gate.
 
 ## During implementation
 
-Run formatter and tests only for the affected package/component as needed.
+For code-only stages, do not create, edit, inspect, or run tests. Format production
+files and compile only the affected target. Defer behavioral verification and
+review to the named block gate.
 
 ## Final gate
 
-Run the complete required formatter, tests, race/type checks, lint, build and
-`git diff --check` once. Inspect the final scoped diff and report any check that
-could not run.
+- Code-only implementation stage: formatter, affected build/type compilation,
+  `git diff --check`, and scoped production diff inspection only.
+- Backend block gate (`012`) or frontend block gate (`015`): create the planned
+  tests, run the complete relevant test/race/type/lint/build/smoke suite, perform
+  independent review, and record findings for an optional `.1` correction prompt.
+
+Never add opportunistic tests to a code-only stage.
 
 # Final report
 

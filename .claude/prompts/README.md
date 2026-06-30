@@ -42,4 +42,24 @@ backend acceptance, frontend gallery geometry, UI accessibility hardening, and
 final clean-clone acceptance. Corrective `.1` prompts are created only after a
 real review finding.
 
+## Deferred testing policy
+
+Implementation stages write production code only. They may format and compile the
+affected target, but must not create, modify, or run tests. Do not include test
+matrices, fixtures, Docker smoke, race checks, repeated runs, lint gates, or
+independent review in stages `009`–`011` and `013`–`014`.
+
+Testing and correction happen at two explicit block gates:
+
+1. **Stage 012 — backend gate.** Add and run the assignment-critical backend
+   tests, including thumbnail parsing/math, cache duplicate suppression,
+   ingest-to-read smoke, race/vet/build, resource checks, and backend review.
+   Create `012.1` only for findings from that gate.
+2. **Stage 015 — frontend gate.** Add and run bbox geometry, reducer/component,
+   gallery/viewer/accessibility tests, type/lint/build checks, and frontend review.
+   Create `015.1` only for findings from that gate.
+
+Stages `017` and `018` validate production packaging and clean-clone acceptance;
+they do not move block-gate test suites back into every implementation prompt.
+
 Prompt files are a curated record of important tasks. Full chat transcripts do not need to be committed.

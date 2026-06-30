@@ -8,21 +8,58 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"scout/internal/config"
 	"scout/internal/httpapi"
+	"scout/internal/objectstorage"
+	"scout/internal/repository/sqlite"
 )
 
 func main() {
 	os.Exit(run())
 }
 
-func run() int {
+func run() (exitCode int) {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 
 	cfg, err := config.Load()
 	if err != nil {
 		logger.Error("configuration error", "error", err)
+		return 1
+	}
+
+	s3cfg, err := config.LoadS3Config()
+	if err != nil {
+		logger.Error("storage configuration error", "error", err)
+		return 1
+	}
+
+	repo, err := sqlite.Open(cfg.DatabasePath)
+	if err != nil {
+		logger.Error("database open failed", "error", err)
+		return 1
+	}
+	defer func() {
+		if cerr := repo.Close(); cerr != nil {
+			logger.Error("database close failed", "error", cerr)
+			if exitCode == 0 {
+				exitCode = 1
+			}
+		}
+	}()
+
+	storage, err := objectstorage.New(*s3cfg)
+	if err != nil {
+		logger.Error("storage construction failed", "error", err)
+		return 1
+	}
+
+	checkCtx, checkCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	bucketErr := storage.CheckBucket(checkCtx)
+	checkCancel()
+	if bucketErr != nil {
+		logger.Error("bucket check failed", "error", bucketErr)
 		return 1
 	}
 
@@ -32,6 +69,8 @@ func run() int {
 			Logger:         logger,
 			AllowedOrigins: cfg.CORSAllowedOrigins,
 			APIKey:         cfg.APIKey,
+			Repo:           repo,
+			Storage:        storage,
 		}),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTPReadTimeout,

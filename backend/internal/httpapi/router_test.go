@@ -14,6 +14,8 @@ func productionRouter(t *testing.T) http.Handler {
 		Logger:         discardLogger(),
 		AllowedOrigins: []string{"http://localhost:5173"},
 		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
 	})
 }
 

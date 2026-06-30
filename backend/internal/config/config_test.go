@@ -33,6 +33,7 @@ func TestLoad_Defaults(t *testing.T) {
 	t.Setenv("SCOUT_API_KEY", "test-api-key-for-defaults")
 	unsetForTest(t, "SCOUT_CORS_ALLOWED_ORIGINS")
 	unsetForTest(t, "SCOUT_HTTP_MAX_HEADER_BYTES")
+	t.Setenv("SCOUT_DATABASE_PATH", "dataset/predictions.db")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -62,6 +63,9 @@ func TestLoad_Defaults(t *testing.T) {
 	if got, want := cfg.HTTPMaxHeaderBytes, config.DefaultHTTPMaxHeaderBytes; got != want {
 		t.Errorf("HTTPMaxHeaderBytes = %d, want %d", got, want)
 	}
+	if got, want := cfg.DatabasePath, "dataset/predictions.db"; got != want {
+		t.Errorf("DatabasePath = %q, want %q", got, want)
+	}
 }
 
 func TestLoad_Overrides(t *testing.T) {
@@ -74,6 +78,7 @@ func TestLoad_Overrides(t *testing.T) {
 	t.Setenv("SCOUT_API_KEY", "test-override-key")
 	t.Setenv("SCOUT_CORS_ALLOWED_ORIGINS", "https://example.com, http://app.local:3000")
 	t.Setenv("SCOUT_HTTP_MAX_HEADER_BYTES", "131072")
+	t.Setenv("SCOUT_DATABASE_PATH", "/data/scout.db")
 
 	cfg, err := config.Load()
 	if err != nil {
@@ -105,11 +110,15 @@ func TestLoad_Overrides(t *testing.T) {
 	if got, want := cfg.HTTPMaxHeaderBytes, 131072; got != want {
 		t.Errorf("HTTPMaxHeaderBytes = %d, want %d", got, want)
 	}
+	if got, want := cfg.DatabasePath, "/data/scout.db"; got != want {
+		t.Errorf("DatabasePath = %q, want %q", got, want)
+	}
 }
 
 func TestLoad_Errors(t *testing.T) {
-	// Set a valid API key so each subtest fails only for its intended reason.
+	// Set valid base env so each subtest fails only for its intended reason.
 	t.Setenv("SCOUT_API_KEY", "test-key-for-error-tests")
+	t.Setenv("SCOUT_DATABASE_PATH", "dataset/predictions.db")
 
 	tests := []struct {
 		name  string
@@ -146,6 +155,7 @@ func TestLoad_Errors(t *testing.T) {
 func TestLoad_APIKey(t *testing.T) {
 	t.Setenv("SCOUT_CORS_ALLOWED_ORIGINS", "http://localhost:5173")
 	t.Setenv("SCOUT_HTTP_MAX_HEADER_BYTES", "")
+	t.Setenv("SCOUT_DATABASE_PATH", "dataset/predictions.db")
 
 	tests := []struct {
 		name    string
@@ -178,6 +188,7 @@ func TestLoad_APIKey(t *testing.T) {
 func TestLoad_CORSAllowedOrigins(t *testing.T) {
 	t.Setenv("SCOUT_API_KEY", "test-cors-key")
 	t.Setenv("SCOUT_HTTP_MAX_HEADER_BYTES", "")
+	t.Setenv("SCOUT_DATABASE_PATH", "dataset/predictions.db")
 
 	tests := []struct {
 		name        string
@@ -244,6 +255,7 @@ func TestLoad_CORSAllowedOrigins(t *testing.T) {
 func TestLoad_MaxHeaderBytes(t *testing.T) {
 	t.Setenv("SCOUT_API_KEY", "test-maxheader-key")
 	t.Setenv("SCOUT_CORS_ALLOWED_ORIGINS", "http://localhost:5173")
+	t.Setenv("SCOUT_DATABASE_PATH", "dataset/predictions.db")
 
 	tests := []struct {
 		name    string
@@ -273,6 +285,46 @@ func TestLoad_MaxHeaderBytes(t *testing.T) {
 			}
 			if cfg.HTTPMaxHeaderBytes != tt.want {
 				t.Errorf("HTTPMaxHeaderBytes = %d, want %d", cfg.HTTPMaxHeaderBytes, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoad_DatabasePath(t *testing.T) {
+	t.Setenv("SCOUT_API_KEY", "test-db-key")
+	t.Setenv("SCOUT_CORS_ALLOWED_ORIGINS", "http://localhost:5173")
+
+	tests := []struct {
+		name    string
+		value   string
+		unset   bool
+		wantErr bool
+	}{
+		{name: "valid_relative", value: "dataset/predictions.db", wantErr: false},
+		{name: "valid_absolute", value: "/var/data/scout.db", wantErr: false},
+		{name: "missing", unset: true, wantErr: true},
+		{name: "empty", value: "", wantErr: true},
+		{name: "whitespace_only", value: "   ", wantErr: true},
+		{name: "tab_only", value: "\t", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.unset {
+				unsetForTest(t, "SCOUT_DATABASE_PATH")
+			} else {
+				t.Setenv("SCOUT_DATABASE_PATH", tt.value)
+			}
+			cfg, err := config.Load()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("Load() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr || cfg == nil {
+				return
+			}
+			want := strings.TrimSpace(tt.value)
+			if cfg.DatabasePath != want {
+				t.Errorf("DatabasePath = %q, want %q", cfg.DatabasePath, want)
 			}
 		})
 	}

@@ -105,6 +105,8 @@ func TestRequestID_Generated_WhenMissingOrInvalid(t *testing.T) {
 				Logger:         discardLogger(),
 				AllowedOrigins: []string{"http://localhost:5173"},
 				APIKey:         testAPIKey,
+				Repo:           noopRepo{},
+				Storage:        noopStorage{},
 			})
 			_ = handler // using the production router for the healthz endpoint
 			w := httptest.NewRecorder()
@@ -136,6 +138,8 @@ func TestRequestID_AcceptedAndEchoed_WhenValid(t *testing.T) {
 		Logger:         discardLogger(),
 		AllowedOrigins: []string{"http://localhost:5173"},
 		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
 	})
 	for _, incoming := range cases {
 		truncated := incoming
@@ -502,6 +506,8 @@ func corsTestRouter(t *testing.T) http.Handler {
 		Logger:         discardLogger(),
 		AllowedOrigins: []string{corsAllowedOrigin},
 		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
 	})
 }
 
@@ -642,6 +648,8 @@ func TestHealthz_PublicWithRequestID(t *testing.T) {
 		Logger:         discardLogger(),
 		AllowedOrigins: []string{corsAllowedOrigin},
 		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
 	})
 
 	w := httptest.NewRecorder()
@@ -662,6 +670,8 @@ func TestHealthz_PublicWithoutAPIKey(t *testing.T) {
 		Logger:         discardLogger(),
 		AllowedOrigins: []string{corsAllowedOrigin},
 		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
 	})
 
 	w := httptest.NewRecorder()
