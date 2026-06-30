@@ -1,0 +1,285 @@
+openapi: 3.0.3
+info:
+  title: Scout API
+  version: 1.0.0
+  description: |
+    Scout is a small computer-vision platform for greenhouse crop monitoring. Cameras shoot photos and a
+    model detects pests and diseases (bounding boxes).
+
+    Photo metadata and predictions are provided in a SQLite database (`predictions.db`). Read from it
+    directly. The original photos are uploaded to object storage through this API (presigned PUT), and
+    clients then read the photos, their predictions, and a URL to each original photo.
+
+    This contract covers the DATA API. Thumbnail delivery (serving photos at any size, density, or
+    quality) is yours to design and is not part of this contract. See the assignment.
+
+    Auth: the data API needs the `X-API-Key` header (a single static key, which you set).
+
+    Errors: every error response shares `request_id` and `message`, plus a machine-readable `code`. Map a
+    typed error to the right status in one place; never leak stack traces.
+
+    Bounding boxes are normalized to `[0,1]` against the original image. Two corners: xMin, yMin
+    (top-left) and xMax, yMax (bottom-right).
+
+    There is a single greenhouse, a fixed plane of 40 by 40 meters (a constant, not a resource).
+    Each photo's `x` and `y` give where it sits on that plane (meters); `h` is the camera height above
+    the floor (meters). Use `x` and `y` to place photos on the map.
+
+servers:
+  - url: http://localhost:8080
+    description: Your instance (local, or a deployed URL if you have one)
+
+security:
+  - ApiKeyAuth: []
+
+tags:
+  - name: PhotosAPI
+    description: Read photos with their predictions and obtain upload links for the originals.
+
+paths:
+  /photos/{photoId}/upload-link:
+    post:
+      tags: [PhotosAPI]
+      operationId: createUploadLink
+      summary: Get a presigned PUT URL to upload a photo's original bytes
+      description: |
+        Returns a short-lived presigned PUT URL. The client uploads the original image bytes directly
+        to object storage with it. After a successful PUT, the original photo is available in object
+        storage at the photo's key and `GET /photos/{photoId}` exposes its `originalUrl`.
+      parameters:
+        - $ref: '#/components/parameters/PhotoId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/UploadLinkRequest' }
+      responses:
+        '200':
+          description: Presigned upload link
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/UploadLink' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /photos/{photoId}:
+    get:
+      tags: [PhotosAPI]
+      operationId: getPhoto
+      summary: Get a single photo's metadata, position, original URL and predictions
+      parameters:
+        - $ref: '#/components/parameters/PhotoId'
+      responses:
+        '200':
+          description: Photo
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Photo' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '404': { $ref: '#/components/responses/NotFound' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+  /photos:
+    get:
+      tags: [PhotosAPI]
+      operationId: listPhotos
+      summary: List photos with their predictions (cursor pagination + filters)
+      description: |
+        Both filters are optional. A photo is included when it has at least one prediction that matches
+        every filter you pass: `classId` means a prediction of that class, `minConfidence` means a
+        prediction with `confidence` >= the value, and if you pass both, the SAME prediction must satisfy
+        both. The response always carries ALL of a matched photo's predictions, not only the matching one.
+        With no filters, you get every photo.
+      parameters:
+        - name: cursor
+          in: query
+          description: Opaque pagination token from a previous response's `next_token`.
+          schema: { type: string }
+        - name: limit
+          in: query
+          schema: { type: integer, minimum: 1, maximum: 200, default: 50 }
+        - name: classId
+          in: query
+          description: |
+            Keep photos that have at least one prediction of this class. Known values:
+            `powdery_mildew`, `mirid`, `whitefly_aphid`, `miner_tuta`, `thrips`, `spider_mites`.
+          schema: { type: string, example: powdery_mildew }
+        - name: minConfidence
+          in: query
+          description: Keep photos that have at least one prediction with confidence at or above this value (inclusive).
+          schema: { type: number, minimum: 0, maximum: 1, example: 0.5 }
+      responses:
+        '200':
+          description: A page of photos
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/PhotoPage' }
+        '400': { $ref: '#/components/responses/BadRequest' }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+        '500': { $ref: '#/components/responses/InternalError' }
+
+# Thumbnail delivery (serving photos at arbitrary sizes/DPR/quality, on demand) is intentionally
+# NOT specified here. Designing that interface is part of the assignment. See the README.
+
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+  parameters:
+    PhotoId:
+      name: photoId
+      in: path
+      required: true
+      description: Photo identifier (UUID). Matches an `id` in the provided SQLite.
+      schema: { type: string, format: uuid }
+
+  responses:
+    BadRequest:
+      description: The request was invalid.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/ValidationError' } }
+    Unauthorized:
+      description: Missing or invalid API key.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/AuthenticationError' } }
+    NotFound:
+      description: The requested resource was not found.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } }
+    InternalError:
+      description: An internal server error occurred.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/InternalServerError' } }
+
+  schemas:
+    UploadLinkRequest:
+      type: object
+      required: [contentType]
+      properties:
+        contentType: { type: string, example: image/jpeg }
+
+    UploadLink:
+      type: object
+      required: [url, method, expiresAt]
+      properties:
+        url: { type: string, format: uri, description: Presigned URL the client PUTs the original bytes to. }
+        method: { type: string, enum: [PUT] }
+        headers:
+          type: object
+          additionalProperties: { type: string }
+        expiresAt: { type: string, format: date-time }
+
+    BoundingBox:
+      type: object
+      description: Normalized [0,1] against the original image. Two corners, (xMin,yMin) and (xMax,yMax).
+      required: [xMin, yMin, xMax, yMax]
+      properties:
+        xMin: { type: number, minimum: 0, maximum: 1 }
+        yMin: { type: number, minimum: 0, maximum: 1 }
+        xMax: { type: number, minimum: 0, maximum: 1 }
+        yMax: { type: number, minimum: 0, maximum: 1 }
+
+    Prediction:
+      type: object
+      required: [classId, confidence, bbox]
+      properties:
+        classId:
+          type: string
+          description: |
+            Detection class name. Known values: `powdery_mildew`, `mirid`, `whitefly_aphid`,
+            `miner_tuta`, `thrips`, `spider_mites`.
+          example: powdery_mildew
+        confidence: { type: number, minimum: 0, maximum: 1, example: 0.87 }
+        bbox: { $ref: '#/components/schemas/BoundingBox' }
+
+    Photo:
+      type: object
+      required: [id, x, y, h, width, height, capturedAt, originalUrl, predictions]
+      properties:
+        id: { type: string, format: uuid }
+        x: { type: number, minimum: 0, maximum: 40, description: 'Where the photo sits in the greenhouse, in meters.' }
+        y: { type: number, minimum: 0, maximum: 40, description: 'Where the photo sits in the greenhouse, in meters.' }
+        h: { type: number, minimum: 0, description: 'Camera height above the floor, in meters.' }
+        width: { type: integer, minimum: 1, description: Original width in pixels. }
+        height: { type: integer, minimum: 1, description: Original height in pixels. }
+        capturedAt: { type: string, format: date-time }
+        originalUrl:
+          type: string
+          format: uri
+          description: URL to the original photo in object storage (may be presigned/time-limited).
+        predictions:
+          type: array
+          items: { $ref: '#/components/schemas/Prediction' }
+
+    PhotoPage:
+      type: object
+      required: [items]
+      properties:
+        items:
+          type: array
+          items: { $ref: '#/components/schemas/Photo' }
+        next_token:
+          type: string
+          description: Token to retrieve the next page of items. Pass as `cursor`. Absent on the last page.
+
+    ApiError:
+      type: object
+      description: All error responses share these common fields.
+      required: [request_id, message]
+      properties:
+        request_id:
+          type: string
+          description: Unique identifier for the request, useful for debugging (matches the response correlation id).
+        message:
+          type: string
+          description: Human-readable message describing the error.
+
+    ValidationError:
+      type: object
+      description: The request was invalid.
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+      required: [code, details]
+      properties:
+        code: { type: string, enum: [ValidationError] }
+        details:
+          type: array
+          items:
+            type: object
+            required: [field, issue]
+            properties:
+              field: { type: string }
+              issue: { type: string }
+
+    AuthenticationError:
+      type: object
+      description: Authentication is required to access the resource.
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+      required: [code]
+      properties:
+        code: { type: string, enum: [AuthenticationRequired] }
+
+    NotFoundError:
+      type: object
+      description: The requested resource was not found.
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+      required: [code, resource_id]
+      properties:
+        code: { type: string, enum: [NotFound] }
+        resource_id: { type: string, description: Identifier of the resource that was not found. }
+
+    InternalServerError:
+      type: object
+      description: An internal server error occurred.
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+      required: [code]
+      properties:
+        code: { type: string, enum: [InternalServerError] }

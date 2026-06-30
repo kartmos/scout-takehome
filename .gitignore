@@ -1,0 +1,10 @@
+# Windows metadata files
+*:Zone.Identifier
+
+# Local Claude Code and environment settings
+CLAUDE.local.md
+.claude/settings.local.json
+.env
+
+# Assignment dataset is kept locally and is not committed
+dataset/
