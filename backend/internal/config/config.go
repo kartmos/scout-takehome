@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net"
 	"net/url"
 	"os"
 	"strconv"
@@ -154,6 +155,182 @@ func parseCORSOrigins(raw string) ([]string, error) {
 		return nil, fmt.Errorf("SCOUT_CORS_ALLOWED_ORIGINS: at least one valid origin is required")
 	}
 	return out, nil
+}
+
+// S3Config holds the object storage configuration.
+type S3Config struct {
+	Endpoint    string
+	AccessKey   string // never log or include in error messages
+	SecretKey   string // never log or include in error messages
+	Bucket      string
+	Secure      bool
+	Region      string
+	UploadTTL   time.Duration
+	DownloadTTL time.Duration
+}
+
+const (
+	DefaultS3Region      = "us-east-1"
+	DefaultS3UploadTTL   = 15 * time.Minute
+	DefaultS3DownloadTTL = 15 * time.Minute
+	minS3TTL             = time.Second
+	maxS3TTL             = 7 * 24 * time.Hour
+)
+
+// LoadS3Config loads and validates S3/MinIO configuration from environment variables.
+// Credential values are never included in returned error messages.
+func LoadS3Config() (*S3Config, error) {
+	endpoint := os.Getenv("SCOUT_S3_ENDPOINT")
+	if err := validateS3Endpoint(endpoint); err != nil {
+		return nil, err
+	}
+
+	accessKey := os.Getenv("SCOUT_S3_ACCESS_KEY")
+	if strings.TrimSpace(accessKey) == "" {
+		return nil, fmt.Errorf("SCOUT_S3_ACCESS_KEY is required and must not be empty")
+	}
+
+	secretKey := os.Getenv("SCOUT_S3_SECRET_KEY")
+	if strings.TrimSpace(secretKey) == "" {
+		return nil, fmt.Errorf("SCOUT_S3_SECRET_KEY is required and must not be empty")
+	}
+
+	bucket := os.Getenv("SCOUT_S3_BUCKET")
+	if err := validateS3BucketName(bucket); err != nil {
+		return nil, err
+	}
+
+	secure, err := loadS3Bool("SCOUT_S3_SECURE")
+	if err != nil {
+		return nil, err
+	}
+
+	region := os.Getenv("SCOUT_S3_REGION")
+	if region == "" {
+		region = DefaultS3Region
+	}
+
+	uploadTTL, err := loadS3TTL("SCOUT_S3_UPLOAD_TTL", DefaultS3UploadTTL)
+	if err != nil {
+		return nil, err
+	}
+
+	downloadTTL, err := loadS3TTL("SCOUT_S3_DOWNLOAD_TTL", DefaultS3DownloadTTL)
+	if err != nil {
+		return nil, err
+	}
+
+	return &S3Config{
+		Endpoint:    endpoint,
+		AccessKey:   accessKey,
+		SecretKey:   secretKey,
+		Bucket:      bucket,
+		Secure:      secure,
+		Region:      region,
+		UploadTTL:   uploadTTL,
+		DownloadTTL: downloadTTL,
+	}, nil
+}
+
+// validateS3Endpoint ensures the value is a bare host[:port] with no scheme,
+// credentials, path, query, fragment, or whitespace.
+func validateS3Endpoint(ep string) error {
+	if strings.TrimSpace(ep) == "" {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must not be empty or whitespace-only")
+	}
+	if strings.ContainsAny(ep, " \t\n\r") {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must not contain whitespace")
+	}
+	if strings.Contains(ep, "://") {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a scheme (use host:port form)")
+	}
+	u, err := url.Parse("dummy://" + ep)
+	if err != nil {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT is malformed: %w", err)
+	}
+	if u.User != nil {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include credentials")
+	}
+	if u.Path != "" {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a path")
+	}
+	if u.RawQuery != "" {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a query string")
+	}
+	if u.Fragment != "" {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a fragment")
+	}
+	if u.Hostname() == "" {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT must specify a host")
+	}
+	if strings.HasSuffix(u.Host, ":") {
+		return fmt.Errorf("SCOUT_S3_ENDPOINT has a trailing colon with no port number")
+	}
+	if port := u.Port(); port != "" {
+		n, nerr := strconv.Atoi(port)
+		if nerr != nil || n < 1 || n > 65535 {
+			return fmt.Errorf("SCOUT_S3_ENDPOINT has invalid port %q", port)
+		}
+	}
+	return nil
+}
+
+// validateS3BucketName enforces the DNS-compatible S3 bucket naming rules.
+func validateS3BucketName(name string) error {
+	if len(name) < 3 || len(name) > 63 {
+		return fmt.Errorf("SCOUT_S3_BUCKET must be 3–63 characters, got %d", len(name))
+	}
+	if !isS3AlphaNum(name[0]) || !isS3AlphaNum(name[len(name)-1]) {
+		return fmt.Errorf("SCOUT_S3_BUCKET must start and end with a lowercase letter or digit")
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c == '.' || c == '-' {
+			continue
+		}
+		if (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') {
+			continue
+		}
+		return fmt.Errorf("SCOUT_S3_BUCKET must contain only lowercase letters, digits, dots, and hyphens")
+	}
+	if strings.Contains(name, "..") {
+		return fmt.Errorf("SCOUT_S3_BUCKET must not contain adjacent dots")
+	}
+	if net.ParseIP(name) != nil {
+		return fmt.Errorf("SCOUT_S3_BUCKET must not be an IP address")
+	}
+	return nil
+}
+
+func isS3AlphaNum(c byte) bool {
+	return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+}
+
+func loadS3Bool(name string) (bool, error) {
+	v, ok := os.LookupEnv(name)
+	if !ok || v == "" {
+		return false, fmt.Errorf("%s is required (set to true or false)", name)
+	}
+	b, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s: must be a boolean (true/false/1/0), got %q", name, v)
+	}
+	return b, nil
+}
+
+func loadS3TTL(name string, def time.Duration) (time.Duration, error) {
+	v := os.Getenv(name)
+	if v == "" {
+		return def, nil
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return 0, fmt.Errorf("%s: invalid duration %q: %w", name, v, err)
+	}
+	if d < minS3TTL || d > maxS3TTL {
+		return 0, fmt.Errorf("%s: duration must be between 1s and 7 days, got %q", name, v)
+	}
+	return d, nil
 }
 
 // validateOrigin checks that origin is an exact http or https origin:

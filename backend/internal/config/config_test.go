@@ -2,6 +2,7 @@ package config_test
 
 import (
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -274,5 +275,263 @@ func TestLoad_MaxHeaderBytes(t *testing.T) {
 				t.Errorf("HTTPMaxHeaderBytes = %d, want %d", cfg.HTTPMaxHeaderBytes, tt.want)
 			}
 		})
+	}
+}
+
+// setValidS3Env sets all required S3 env vars to valid development values.
+func setValidS3Env(t *testing.T) {
+	t.Helper()
+	t.Setenv("SCOUT_S3_ENDPOINT", "localhost:9000")
+	t.Setenv("SCOUT_S3_ACCESS_KEY", "test-access-key")
+	t.Setenv("SCOUT_S3_SECRET_KEY", "test-secret-key-value")
+	t.Setenv("SCOUT_S3_BUCKET", "scout-photos")
+	t.Setenv("SCOUT_S3_SECURE", "false")
+	unsetForTest(t, "SCOUT_S3_REGION")
+	unsetForTest(t, "SCOUT_S3_UPLOAD_TTL")
+	unsetForTest(t, "SCOUT_S3_DOWNLOAD_TTL")
+}
+
+func TestLoadS3Config_Defaults(t *testing.T) {
+	setValidS3Env(t)
+	cfg, err := config.LoadS3Config()
+	if err != nil {
+		t.Fatalf("LoadS3Config() error = %v", err)
+	}
+	if cfg.Region != config.DefaultS3Region {
+		t.Errorf("Region = %q, want %q", cfg.Region, config.DefaultS3Region)
+	}
+	if cfg.UploadTTL != config.DefaultS3UploadTTL {
+		t.Errorf("UploadTTL = %v, want %v", cfg.UploadTTL, config.DefaultS3UploadTTL)
+	}
+	if cfg.DownloadTTL != config.DefaultS3DownloadTTL {
+		t.Errorf("DownloadTTL = %v, want %v", cfg.DownloadTTL, config.DefaultS3DownloadTTL)
+	}
+	if cfg.Secure {
+		t.Error("Secure = true, want false")
+	}
+}
+
+func TestLoadS3Config_Overrides(t *testing.T) {
+	setValidS3Env(t)
+	t.Setenv("SCOUT_S3_ENDPOINT", "s3.example.com:443")
+	t.Setenv("SCOUT_S3_BUCKET", "my-bucket-01")
+	t.Setenv("SCOUT_S3_SECURE", "true")
+	t.Setenv("SCOUT_S3_REGION", "eu-west-1")
+	t.Setenv("SCOUT_S3_UPLOAD_TTL", "30m")
+	t.Setenv("SCOUT_S3_DOWNLOAD_TTL", "5m")
+
+	cfg, err := config.LoadS3Config()
+	if err != nil {
+		t.Fatalf("LoadS3Config() error = %v", err)
+	}
+	if cfg.Endpoint != "s3.example.com:443" {
+		t.Errorf("Endpoint = %q", cfg.Endpoint)
+	}
+	if cfg.Bucket != "my-bucket-01" {
+		t.Errorf("Bucket = %q", cfg.Bucket)
+	}
+	if !cfg.Secure {
+		t.Error("Secure = false, want true")
+	}
+	if cfg.Region != "eu-west-1" {
+		t.Errorf("Region = %q", cfg.Region)
+	}
+	if cfg.UploadTTL != 30*time.Minute {
+		t.Errorf("UploadTTL = %v, want 30m", cfg.UploadTTL)
+	}
+	if cfg.DownloadTTL != 5*time.Minute {
+		t.Errorf("DownloadTTL = %v, want 5m", cfg.DownloadTTL)
+	}
+}
+
+func TestLoadS3Config_Endpoint(t *testing.T) {
+	setValidS3Env(t)
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "bare_host", value: "localhost", wantErr: false},
+		{name: "host_port", value: "localhost:9000", wantErr: false},
+		{name: "hostname_port", value: "minio.internal:9000", wantErr: false},
+		{name: "empty", value: "", wantErr: true},
+		{name: "whitespace_only", value: "   ", wantErr: true},
+		{name: "with_scheme_http", value: "http://localhost:9000", wantErr: true},
+		{name: "with_scheme_https", value: "https://s3.example.com", wantErr: true},
+		{name: "with_credentials", value: "user@localhost:9000", wantErr: true},
+		{name: "trailing_slash", value: "localhost:9000/", wantErr: true},
+		{name: "with_path", value: "localhost:9000/bucket", wantErr: true},
+		{name: "with_query", value: "localhost:9000?region=us", wantErr: true},
+		{name: "with_fragment", value: "localhost:9000#section", wantErr: true},
+		{name: "trailing_colon", value: "localhost:", wantErr: true},
+		{name: "invalid_port_alpha", value: "localhost:abc", wantErr: true},
+		{name: "invalid_port_zero", value: "localhost:0", wantErr: true},
+		{name: "invalid_port_large", value: "localhost:99999", wantErr: true},
+		{name: "embedded_space", value: "local host:9000", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCOUT_S3_ENDPOINT", tt.value)
+			_, err := config.LoadS3Config()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("LoadS3Config() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadS3Config_Bucket(t *testing.T) {
+	setValidS3Env(t)
+	tests := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "valid_simple", value: "mybucket", wantErr: false},
+		{name: "valid_with_hyphen", value: "scout-photos", wantErr: false},
+		{name: "valid_with_dot", value: "my.bucket", wantErr: false},
+		{name: "valid_min_length", value: "abc", wantErr: false},
+		{name: "valid_digits", value: "bucket01", wantErr: false},
+		{name: "too_short", value: "ab", wantErr: true},
+		{name: "empty", value: "", wantErr: true},
+		{name: "uppercase", value: "MyBucket", wantErr: true},
+		{name: "starts_with_hyphen", value: "-bucket", wantErr: true},
+		{name: "ends_with_hyphen", value: "bucket-", wantErr: true},
+		{name: "starts_with_dot", value: ".bucket", wantErr: true},
+		{name: "ends_with_dot", value: "bucket.", wantErr: true},
+		{name: "adjacent_dots", value: "my..bucket", wantErr: true},
+		{name: "ip_address", value: "192.168.1.1", wantErr: true},
+		{name: "contains_underscore", value: "my_bucket", wantErr: true},
+		{name: "contains_space", value: "my bucket", wantErr: true},
+		{name: "too_long", value: strings.Repeat("a", 64), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCOUT_S3_BUCKET", tt.value)
+			_, err := config.LoadS3Config()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("LoadS3Config() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadS3Config_Secure(t *testing.T) {
+	setValidS3Env(t)
+	tests := []struct {
+		name    string
+		value   string
+		want    bool
+		wantErr bool
+	}{
+		{name: "true", value: "true", want: true},
+		{name: "false", value: "false", want: false},
+		{name: "one", value: "1", want: true},
+		{name: "zero", value: "0", want: false},
+		{name: "TRUE", value: "TRUE", want: true},
+		{name: "FALSE", value: "FALSE", want: false},
+		{name: "empty", value: "", wantErr: true},
+		{name: "malformed_yes", value: "yes", wantErr: true},
+		{name: "malformed_no", value: "no", wantErr: true},
+		{name: "malformed_on", value: "on", wantErr: true},
+		{name: "malformed_number", value: "2", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCOUT_S3_SECURE", tt.value)
+			cfg, err := config.LoadS3Config()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadS3Config() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if cfg.Secure != tt.want {
+				t.Errorf("Secure = %v, want %v", cfg.Secure, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadS3Config_TTL(t *testing.T) {
+	setValidS3Env(t)
+	tests := []struct {
+		name    string
+		env     string
+		value   string
+		want    time.Duration
+		wantErr bool
+	}{
+		{name: "upload_default", env: "SCOUT_S3_UPLOAD_TTL", value: "", want: config.DefaultS3UploadTTL},
+		{name: "upload_30m", env: "SCOUT_S3_UPLOAD_TTL", value: "30m", want: 30 * time.Minute},
+		{name: "upload_1s_min", env: "SCOUT_S3_UPLOAD_TTL", value: "1s", want: time.Second},
+		{name: "upload_7d_max", env: "SCOUT_S3_UPLOAD_TTL", value: "168h", want: 168 * time.Hour},
+		{name: "download_default", env: "SCOUT_S3_DOWNLOAD_TTL", value: "", want: config.DefaultS3DownloadTTL},
+		{name: "download_5m", env: "SCOUT_S3_DOWNLOAD_TTL", value: "5m", want: 5 * time.Minute},
+		{name: "upload_too_short", env: "SCOUT_S3_UPLOAD_TTL", value: "500ms", wantErr: true},
+		{name: "upload_too_long", env: "SCOUT_S3_UPLOAD_TTL", value: "169h", wantErr: true},
+		{name: "upload_zero", env: "SCOUT_S3_UPLOAD_TTL", value: "0s", wantErr: true},
+		{name: "upload_negative", env: "SCOUT_S3_UPLOAD_TTL", value: "-1m", wantErr: true},
+		{name: "upload_malformed", env: "SCOUT_S3_UPLOAD_TTL", value: "abc", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.env, tt.value)
+			cfg, err := config.LoadS3Config()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadS3Config() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			var got time.Duration
+			if tt.env == "SCOUT_S3_UPLOAD_TTL" {
+				got = cfg.UploadTTL
+			} else {
+				got = cfg.DownloadTTL
+			}
+			if got != tt.want {
+				t.Errorf("%s = %v, want %v", tt.env, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestLoadS3Config_Credentials(t *testing.T) {
+	setValidS3Env(t)
+	tests := []struct {
+		name    string
+		env     string
+		value   string
+		wantErr bool
+	}{
+		{name: "access_key_missing", env: "SCOUT_S3_ACCESS_KEY", value: "", wantErr: true},
+		{name: "access_key_whitespace", env: "SCOUT_S3_ACCESS_KEY", value: "   ", wantErr: true},
+		{name: "secret_key_missing", env: "SCOUT_S3_SECRET_KEY", value: "", wantErr: true},
+		{name: "secret_key_whitespace", env: "SCOUT_S3_SECRET_KEY", value: "\t", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(tt.env, tt.value)
+			_, err := config.LoadS3Config()
+			if (err != nil) != tt.wantErr {
+				t.Errorf("LoadS3Config() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestLoadS3Config_SecretNotLeaked(t *testing.T) {
+	setValidS3Env(t)
+	secretValue := "super-secret-credential-abc123"
+	t.Setenv("SCOUT_S3_SECRET_KEY", secretValue)
+	t.Setenv("SCOUT_S3_ACCESS_KEY", "") // force an error so we get an error message to inspect
+
+	_, err := config.LoadS3Config()
+	if err == nil {
+		t.Fatal("expected error when access key is empty")
+	}
+	if strings.Contains(err.Error(), secretValue) {
+		t.Errorf("error message must not contain the secret key value: %q", err.Error())
 	}
 }

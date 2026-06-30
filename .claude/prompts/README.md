@@ -28,4 +28,18 @@ Prompts from stage 006 onward use a scoped context manifest:
 This reduces repeated input/context tokens. It does not remove acceptance
 criteria, final race/type/lint/build checks, or independent review gates.
 
+## Consolidated stages after 007
+
+Related work sharing the same files and mental model may be combined into one
+prompt with explicit internal checkpoints. Each checkpoint gets focused tests;
+the prompt gets one complete final gate. Do not split a task merely because it
+has several files, and do not merge unrelated risk domains merely to reduce the
+prompt count.
+
+Keep separate prompts for boundaries where an independent review materially
+improves correctness: external seed/smoke, thumbnail core vs concurrent cache,
+backend acceptance, frontend gallery geometry, UI accessibility hardening, and
+final clean-clone acceptance. Corrective `.1` prompts are created only after a
+real review finding.
+
 Prompt files are a curated record of important tasks. Full chat transcripts do not need to be committed.
