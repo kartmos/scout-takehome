@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -41,14 +43,35 @@ type Repository struct {
 	db *sql.DB
 }
 
-// Open resolves the path, opens SQLite in read-only mode, and returns a ready Repository.
+// photoRow carries a domain photo together with the exact captured_at string
+// scanned from SQLite. The raw string is kept so that NextToken cursors use the
+// original text for SQL boundary comparisons without UTC normalisation.
+type photoRow struct {
+	photo         domain.Photo
+	capturedAtRaw string
+}
+
+// Open resolves the path to an absolute path, constructs a safe read-only
+// SQLite file URI with net/url, and returns a ready Repository.
 func Open(path string) (*Repository, error) {
 	if path == "" {
 		return nil, fmt.Errorf("sqlite: database path must not be empty")
 	}
 
-	// Open read-only via URI query parameter; modernc.org/sqlite honours the standard flags.
-	dsn := fmt.Sprintf("file:%s?mode=ro&_foreign_keys=1", path)
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return nil, fmt.Errorf("sqlite: resolve path %q: %w", path, err)
+	}
+
+	// Build a file URI using net/url so that path characters such as spaces,
+	// '#', and '?' are percent-encoded and do not corrupt the DSN.
+	u := &url.URL{
+		Scheme:   "file",
+		Path:     absPath,
+		RawQuery: "mode=ro",
+	}
+	dsn := u.String()
+
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, fmt.Errorf("sqlite: open %q: %w", path, err)
@@ -135,67 +158,73 @@ func (r *Repository) ListPhotos(ctx context.Context, params ListPhotosParams) (d
 	}
 
 	var (
-		hasCursor bool
-		cursorAt  time.Time
-		cursorID  string
+		hasCursor   bool
+		cursorAtRaw string
+		cursorID    string
 	)
 	if params.Cursor != "" {
 		hasCursor = true
-		cursorAt, cursorID, err = decodeCursor(params.Cursor)
+		cursorAtRaw, cursorID, err = decodeCursor(params.Cursor)
 		if err != nil {
 			return domain.PhotoPage{}, err
 		}
 	}
 
-	photos, hasMore, err := r.queryPhotos(ctx, hasCursor, cursorAt, cursorID, params.ClassID, params.MinConfidence, limit)
+	rows, hasMore, err := r.queryPhotos(ctx, hasCursor, cursorAtRaw, cursorID, params.ClassID, params.MinConfidence, limit)
 	if err != nil {
 		return domain.PhotoPage{}, err
 	}
 
-	if len(photos) == 0 {
+	if len(rows) == 0 {
 		return domain.PhotoPage{Items: []domain.Photo{}}, nil
 	}
 
 	// Load all predictions for this page in one query.
-	ids := make([]string, len(photos))
-	for i, p := range photos {
-		ids[i] = p.ID
+	ids := make([]string, len(rows))
+	for i, row := range rows {
+		ids[i] = row.photo.ID
 	}
 	predMap, err := r.loadPredictions(ctx, ids)
 	if err != nil {
 		return domain.PhotoPage{}, err
 	}
-	for i := range photos {
-		photos[i].Predictions = predMap[photos[i].ID]
-		if photos[i].Predictions == nil {
-			photos[i].Predictions = []domain.Prediction{}
+
+	photos := make([]domain.Photo, len(rows))
+	for i, row := range rows {
+		ph := row.photo
+		ph.Predictions = predMap[ph.ID]
+		if ph.Predictions == nil {
+			ph.Predictions = []domain.Prediction{}
 		}
+		photos[i] = ph
 	}
 
 	page := domain.PhotoPage{Items: photos}
 	if hasMore {
-		last := photos[len(photos)-1]
-		page.NextToken = encodeCursor(last.CapturedAt, last.ID)
+		last := rows[len(rows)-1]
+		page.NextToken = encodeCursor(last.capturedAtRaw, last.photo.ID)
 	}
 	return page, nil
 }
 
 // queryPhotos fetches up to limit photo rows (plus one sentinel for hasMore detection).
+// cursorAtRaw is the exact captured_at string from SQLite used as the keyset boundary;
+// it is compared directly against the column to avoid UTC-normalisation skew.
 func (r *Repository) queryPhotos(
 	ctx context.Context,
 	hasCursor bool,
-	cursorAt time.Time,
+	cursorAtRaw string,
 	cursorID string,
 	classID *domain.ClassID,
 	minConf *float64,
 	limit int,
-) ([]domain.Photo, bool, error) {
+) ([]photoRow, bool, error) {
 	var args []any
 	var clauses []string
 
 	if hasCursor {
 		clauses = append(clauses, "(p.captured_at < ? OR (p.captured_at = ? AND p.id < ?))")
-		args = append(args, cursorAt.UTC().Format(time.RFC3339Nano), cursorAt.UTC().Format(time.RFC3339Nano), cursorID)
+		args = append(args, cursorAtRaw, cursorAtRaw, cursorID)
 	}
 
 	if classID != nil || minConf != nil {
@@ -222,36 +251,38 @@ func (r *Repository) queryPhotos(
 	q.WriteString(" ORDER BY p.captured_at DESC, p.id DESC LIMIT ?")
 	args = append(args, limit+1)
 
-	rows, err := r.db.QueryContext(ctx, q.String(), args...)
+	sqlRows, err := r.db.QueryContext(ctx, q.String(), args...)
 	if err != nil {
 		return nil, false, apperror.NewInternal(fmt.Errorf("sqlite: list photos query: %w", err))
 	}
-	defer rows.Close()
+	defer sqlRows.Close()
 
-	var photos []domain.Photo
-	for rows.Next() {
-		ph, err := scanPhotoRow(rows)
+	var photoRows []photoRow
+	for sqlRows.Next() {
+		pr, err := scanPhotoRow(sqlRows)
 		if err != nil {
 			return nil, false, err
 		}
-		photos = append(photos, ph)
+		photoRows = append(photoRows, pr)
 	}
-	if err = rows.Err(); err != nil {
+	if err = sqlRows.Err(); err != nil {
 		return nil, false, apperror.NewInternal(fmt.Errorf("sqlite: list photos rows: %w", err))
 	}
-	if err = rows.Close(); err != nil {
+	if err = sqlRows.Close(); err != nil {
 		return nil, false, apperror.NewInternal(fmt.Errorf("sqlite: list photos close: %w", err))
 	}
 
-	hasMore := len(photos) > limit
+	hasMore := len(photoRows) > limit
 	if hasMore {
-		photos = photos[:limit]
+		photoRows = photoRows[:limit]
 	}
-	return photos, hasMore, nil
+	return photoRows, hasMore, nil
 }
 
 // loadPredictions fetches all predictions for the given photo IDs in one query.
 // Returns a map from photo ID to prediction slice.
+// Predictions are ordered by (photo_id, id) using the declared primary key,
+// not rowid, to ensure a deterministic and stable ordering.
 func (r *Repository) loadPredictions(ctx context.Context, photoIDs []string) (map[string][]domain.Prediction, error) {
 	if len(photoIDs) == 0 {
 		return map[string][]domain.Prediction{}, nil
@@ -260,7 +291,7 @@ func (r *Repository) loadPredictions(ctx context.Context, photoIDs []string) (ma
 	placeholders := strings.Repeat("?,", len(photoIDs))
 	placeholders = placeholders[:len(placeholders)-1]
 	q := fmt.Sprintf(
-		"SELECT photo_id, class_id, confidence, bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax FROM predictions WHERE photo_id IN (%s) ORDER BY photo_id, rowid",
+		"SELECT photo_id, class_id, confidence, bbox_xmin, bbox_ymin, bbox_xmax, bbox_ymax FROM predictions WHERE photo_id IN (%s) ORDER BY photo_id, id",
 		placeholders,
 	)
 	args := make([]any, len(photoIDs))
@@ -322,31 +353,25 @@ type photoScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanPhoto(row *sql.Row) (domain.Photo, error) {
-	return scanPhotoScanner(row)
-}
-
-func scanPhotoRow(rows *sql.Rows) (domain.Photo, error) {
-	return scanPhotoScanner(rows)
-}
-
-func scanPhotoScanner(s photoScanner) (domain.Photo, error) {
+// scanPhotoScanner scans a photo row and returns the domain.Photo together with
+// the exact captured_at string as stored in SQLite (not UTC-normalised).
+func scanPhotoScanner(s photoScanner) (domain.Photo, string, error) {
 	var id, capturedAtStr string
 	var x, y, h float64
 	var width, height int
 
 	if err := s.Scan(&id, &x, &y, &h, &width, &height, &capturedAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return domain.Photo{}, sql.ErrNoRows
+			return domain.Photo{}, "", sql.ErrNoRows
 		}
-		return domain.Photo{}, apperror.NewInternal(fmt.Errorf("sqlite: scan photo: %w", err))
+		return domain.Photo{}, "", apperror.NewInternal(fmt.Errorf("sqlite: scan photo: %w", err))
 	}
 
 	t, err := time.Parse(time.RFC3339Nano, capturedAtStr)
 	if err != nil {
 		t, err = time.Parse(time.RFC3339, capturedAtStr)
 		if err != nil {
-			return domain.Photo{}, apperror.NewInternal(fmt.Errorf("sqlite: malformed captured_at %q: %w", capturedAtStr, err))
+			return domain.Photo{}, "", apperror.NewInternal(fmt.Errorf("sqlite: malformed captured_at %q: %w", capturedAtStr, err))
 		}
 	}
 
@@ -361,8 +386,21 @@ func scanPhotoScanner(s photoScanner) (domain.Photo, error) {
 	}
 
 	if fieldErrs := domain.ValidatePhoto(ph); len(fieldErrs) > 0 {
-		return domain.Photo{}, apperror.NewInternal(fmt.Errorf("sqlite: malformed photo row %s: %s", id, fieldErrs[0].Error()))
+		return domain.Photo{}, "", apperror.NewInternal(fmt.Errorf("sqlite: malformed photo row %s: %s", id, fieldErrs[0].Error()))
 	}
 
-	return ph, nil
+	return ph, capturedAtStr, nil
+}
+
+func scanPhoto(row *sql.Row) (domain.Photo, error) {
+	ph, _, err := scanPhotoScanner(row)
+	return ph, err
+}
+
+func scanPhotoRow(rows *sql.Rows) (photoRow, error) {
+	ph, raw, err := scanPhotoScanner(rows)
+	if err != nil {
+		return photoRow{}, err
+	}
+	return photoRow{photo: ph, capturedAtRaw: raw}, nil
 }

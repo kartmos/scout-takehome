@@ -4,8 +4,10 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -162,21 +164,69 @@ func TestOpen_emptyPath(t *testing.T) {
 }
 
 func TestOpen_readOnly(t *testing.T) {
-	r, path := openFixture(t)
+	r, _ := openFixture(t)
 
-	// Attempting a write via the repo's internal db (via a raw query workaround)
-	// is not possible without exposing internals, so we verify indirectly:
-	// open a second connection in write mode and ensure the fixture DB is reachable.
-	db2, err := sql.Open("sqlite", "file:"+path)
-	if err != nil {
-		t.Fatalf("second open: %v", err)
+	// Attempt a real write through the repository's own connection (same package → db accessible).
+	_, writeErr := r.db.Exec(
+		`INSERT INTO photos (id,x,y,h,width,height,captured_at) VALUES (?,1,1,1,100,100,'2024-01-01T00:00:00Z')`,
+		"dddddddd-dddd-dddd-dddd-dddddddddddd",
+	)
+	if writeErr == nil {
+		t.Fatal("expected INSERT to fail on read-only connection")
 	}
-	defer db2.Close()
+	if !strings.Contains(strings.ToLower(writeErr.Error()), "readonly") &&
+		!strings.Contains(strings.ToLower(writeErr.Error()), "read-only") {
+		t.Errorf("expected a readonly SQLite error, got: %v", writeErr)
+	}
 
-	// The read-only repository should still be usable alongside the writer.
-	exists, err := r.PhotoExists(context.Background(), photoA1)
+	// Verify the INSERT was rejected: the new row must not exist.
+	ctx := context.Background()
+	exists, err := r.PhotoExists(ctx, "dddddddd-dddd-dddd-dddd-dddddddddddd")
+	if err != nil {
+		t.Fatalf("PhotoExists after failed write: %v", err)
+	}
+	if exists {
+		t.Error("row must not exist after rejected INSERT")
+	}
+
+	// Normal reads must still work after the failed write.
+	exists, err = r.PhotoExists(ctx, photoA1)
 	if err != nil || !exists {
-		t.Fatalf("PhotoExists after second open: exists=%v err=%v", exists, err)
+		t.Fatalf("read after failed write: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestOpen_pathWithSpecialChars(t *testing.T) {
+	// Create a fixture DB at a normal path, then copy it to paths containing
+	// characters that are significant in URIs (space, '#', '?').
+	normalPath := createFixtureDB(t)
+	data, err := os.ReadFile(normalPath)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+
+	for _, dirName := range []string{"path with spaces", "path#hash", "path?question"} {
+		t.Run(dirName, func(t *testing.T) {
+			specialDir := filepath.Join(t.TempDir(), dirName)
+			if err := os.MkdirAll(specialDir, 0o755); err != nil {
+				t.Fatalf("MkdirAll: %v", err)
+			}
+			specialPath := filepath.Join(specialDir, "scout-test.db")
+			if err := os.WriteFile(specialPath, data, 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			r, err := Open(specialPath)
+			if err != nil {
+				t.Fatalf("Open(%q): %v", specialPath, err)
+			}
+			defer r.Close()
+
+			exists, err := r.PhotoExists(context.Background(), photoA1)
+			if err != nil || !exists {
+				t.Fatalf("PhotoExists: %v (exists=%v)", err, exists)
+			}
+		})
 	}
 }
 
@@ -693,6 +743,153 @@ func TestGetPhoto_contextCancelled(t *testing.T) {
 	_, err := r.GetPhoto(ctx, photoA1)
 	if err == nil {
 		t.Fatal("expected error for cancelled context")
+	}
+}
+
+// ---- Pagination with non-UTC offset timestamps ----
+
+func TestListPhotos_nonUTCCursorTimestamp(t *testing.T) {
+	// Create a fresh fixture whose captured_at values use a +05:30 offset.
+	// The old code normalised the cursor timestamp to UTC before using it in
+	// the SQL boundary; with an offset-encoded string, that produced a different
+	// text than the stored value and caused omissions on the second page.
+	baseDir := t.TempDir()
+
+	// Build URI for the writable setup connection using the same safe approach.
+	dbPath := filepath.Join(baseDir, "offset-test.db")
+	setupU := &url.URL{Scheme: "file", Path: dbPath}
+	setupDB, err := sql.Open("sqlite", setupU.String())
+	if err != nil {
+		t.Fatalf("setup open: %v", err)
+	}
+	if _, err = setupDB.Exec(schema); err != nil {
+		setupDB.Close()
+		t.Fatalf("setup schema: %v", err)
+	}
+
+	// Four photos with +05:30 offset timestamps, ordered DESC lexicographically.
+	ist := time.FixedZone("+05:30", 5*3600+30*60)
+	offsets := []struct {
+		id string
+		t  time.Time
+	}{
+		{"11111111-1111-1111-1111-111111111111", time.Date(2024, 1, 4, 17, 30, 0, 0, ist)},
+		{"22222222-2222-2222-2222-222222222222", time.Date(2024, 1, 3, 14, 30, 0, 0, ist)},
+		{"33333333-3333-3333-3333-333333333333", time.Date(2024, 1, 3, 10, 0, 0, 0, ist)},
+		{"44444444-4444-4444-4444-444444444444", time.Date(2024, 1, 1, 9, 0, 0, 0, ist)},
+	}
+	wantOrder := make([]string, len(offsets))
+	for i, o := range offsets {
+		wantOrder[i] = o.id
+		ts := o.t.Format(time.RFC3339) // e.g. "2024-01-04T17:30:00+05:30"
+		_, err = setupDB.Exec(
+			`INSERT INTO photos (id,x,y,h,width,height,captured_at) VALUES (?,1,1,1,100,100,?)`,
+			o.id, ts,
+		)
+		if err != nil {
+			setupDB.Close()
+			t.Fatalf("insert photo %s: %v", o.id, err)
+		}
+	}
+	setupDB.Close()
+
+	r, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer r.Close()
+
+	// Traverse all 4 photos 2 at a time and verify no duplicates or omissions.
+	seen := map[string]int{}
+	cursor := ""
+	for {
+		page, err := r.ListPhotos(context.Background(), ListPhotosParams{Limit: 2, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListPhotos: %v", err)
+		}
+		for _, ph := range page.Items {
+			seen[ph.ID]++
+		}
+		cursor = page.NextToken
+		if cursor == "" {
+			break
+		}
+	}
+	for _, id := range wantOrder {
+		if seen[id] != 1 {
+			t.Errorf("photo %q seen %d times, want 1", id, seen[id])
+		}
+	}
+}
+
+// ---- Deterministic prediction ordering ----
+
+func TestLoadPredictions_deterministicIDOrder(t *testing.T) {
+	// Insert predictions for one photo in REVERSE id order so that rowid and id
+	// order diverge. The repository must return them sorted by id, not rowid.
+	baseDir := t.TempDir()
+	dbPath := filepath.Join(baseDir, "pred-order-test.db")
+	setupU := &url.URL{Scheme: "file", Path: dbPath}
+	setupDB, err := sql.Open("sqlite", setupU.String())
+	if err != nil {
+		t.Fatalf("setup open: %v", err)
+	}
+	if _, err = setupDB.Exec(schema); err != nil {
+		setupDB.Close()
+		t.Fatalf("setup schema: %v", err)
+	}
+
+	photoID := "eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee"
+	if _, err = setupDB.Exec(
+		`INSERT INTO photos (id,x,y,h,width,height,captured_at) VALUES (?,1,1,1,100,100,'2024-01-01T00:00:00Z')`,
+		photoID,
+	); err != nil {
+		setupDB.Close()
+		t.Fatalf("insert photo: %v", err)
+	}
+
+	// "fff..." > "000..." lexicographically; insert fff first (rowid=1), 000 second (rowid=2).
+	// With ORDER BY rowid: mirid first. With ORDER BY id: thrips first.
+	predFID := "ffffffff-ffff-ffff-ffff-ffffffffffff" // class mirid, inserted first
+	predAID := "00000000-0000-0000-0000-000000000099" // class thrips, inserted second
+	for _, p := range []struct {
+		id, classID            string
+		conf                   float64
+		xmin, ymin, xmax, ymax float64
+	}{
+		{predFID, "mirid", 0.9, 0.1, 0.1, 0.4, 0.4},
+		{predAID, "thrips", 0.8, 0.5, 0.5, 0.9, 0.9},
+	} {
+		if _, err = setupDB.Exec(
+			`INSERT INTO predictions (id,photo_id,class_id,confidence,bbox_xmin,bbox_ymin,bbox_xmax,bbox_ymax)
+			 VALUES (?,?,?,?,?,?,?,?)`,
+			p.id, photoID, p.classID, p.conf, p.xmin, p.ymin, p.xmax, p.ymax,
+		); err != nil {
+			setupDB.Close()
+			t.Fatalf("insert pred: %v", err)
+		}
+	}
+	setupDB.Close()
+
+	r, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer r.Close()
+
+	ph, err := r.GetPhoto(context.Background(), photoID)
+	if err != nil {
+		t.Fatalf("GetPhoto: %v", err)
+	}
+	if len(ph.Predictions) != 2 {
+		t.Fatalf("expected 2 predictions, got %d", len(ph.Predictions))
+	}
+	// predAID < predFID lexicographically → thrips (A) must come before mirid (F).
+	if ph.Predictions[0].ClassID != domain.ClassThrips {
+		t.Errorf("expected first prediction thrips (lower id), got %q", ph.Predictions[0].ClassID)
+	}
+	if ph.Predictions[1].ClassID != domain.ClassMirid {
+		t.Errorf("expected second prediction mirid (higher id), got %q", ph.Predictions[1].ClassID)
 	}
 }
 
