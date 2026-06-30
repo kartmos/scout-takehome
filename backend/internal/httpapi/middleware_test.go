@@ -2,14 +2,70 @@ package httpapi_test
 
 import (
 	"bytes"
+	"context"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"scout/internal/httpapi"
 )
+
+// capturedLog holds one structured log record for inspection in tests.
+type capturedLog struct {
+	level   slog.Level
+	message string
+	attrs   map[string]string
+}
+
+// memHandler is an in-memory slog.Handler that captures records for counting
+// and attribute inspection. WithAttrs/WithGroup are no-ops because the
+// middleware loggers do not use them.
+type memHandler struct {
+	mu   sync.Mutex
+	logs []capturedLog
+}
+
+func newMemLogger() (*memHandler, *slog.Logger) {
+	h := &memHandler{}
+	return h, slog.New(h)
+}
+
+func (h *memHandler) Enabled(_ context.Context, _ slog.Level) bool { return true }
+
+func (h *memHandler) Handle(_ context.Context, r slog.Record) error {
+	entry := capturedLog{
+		level:   r.Level,
+		message: r.Message,
+		attrs:   make(map[string]string),
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		entry.attrs[a.Key] = a.Value.String()
+		return true
+	})
+	h.mu.Lock()
+	h.logs = append(h.logs, entry)
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *memHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *memHandler) WithGroup(string) slog.Handler      { return h }
+
+// findAll returns all captured records whose Message equals msg.
+func (h *memHandler) findAll(msg string) []capturedLog {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []capturedLog
+	for _, l := range h.logs {
+		if l.message == msg {
+			out = append(out, l)
+		}
+	}
+	return out
+}
 
 const testAPIKey = "test-api-key-xyzlocal"
 
@@ -204,8 +260,7 @@ func panicAfterWriteHandler() http.Handler {
 }
 
 func TestPanicRecovery_BeforeWrite(t *testing.T) {
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	mem, logger := newMemLogger()
 	h := newStackWith(logger, "/", panicHandler("boom"))
 
 	w := httptest.NewRecorder()
@@ -214,6 +269,7 @@ func TestPanicRecovery_BeforeWrite(t *testing.T) {
 
 	h.ServeHTTP(w, r)
 
+	// Response: safe 500 with no panic value exposed.
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
 	}
@@ -221,21 +277,50 @@ func TestPanicRecovery_BeforeWrite(t *testing.T) {
 		t.Errorf("body = %q, want InternalServerError code", w.Body.String())
 	}
 	if strings.Contains(w.Body.String(), "boom") {
-		t.Error("body must not contain the panic value")
+		t.Error("response body must not contain the panic value")
+	}
+	for name, vals := range w.Header() {
+		for _, v := range vals {
+			if strings.Contains(v, "boom") {
+				t.Errorf("response header %q must not contain panic value, got %q", name, v)
+			}
+		}
 	}
 
-	logOut := logBuf.String()
-	if !strings.Contains(logOut, "panic recovered") {
-		t.Error("panic must be logged")
+	// Exactly one diagnostic failure record containing request ID and panic value.
+	panics := mem.findAll("panic recovered")
+	if len(panics) != 1 {
+		t.Errorf("want 1 'panic recovered' diagnostic, got %d", len(panics))
 	}
-	if strings.Contains(logOut, "boom") {
-		t.Error("panic value must not appear in logs")
+	if len(panics) == 1 {
+		if panics[0].level != slog.LevelError {
+			t.Errorf("diagnostic level = %v, want ERROR", panics[0].level)
+		}
+		if panics[0].attrs["request_id"] != "panic-test-id" {
+			t.Errorf("request_id = %q, want panic-test-id", panics[0].attrs["request_id"])
+		}
+		if !strings.Contains(panics[0].attrs["panic"], "boom") {
+			t.Errorf("panic attr = %q, want to contain boom", panics[0].attrs["panic"])
+		}
+	}
+
+	// No duplicate internal-error diagnostic for the same panic.
+	if dups := mem.findAll("internal error"); len(dups) > 0 {
+		t.Errorf("must not emit a second 'internal error' diagnostic, got %d", len(dups))
+	}
+
+	// Exactly one access-completion record with status 500.
+	access := mem.findAll("request completed")
+	if len(access) != 1 {
+		t.Errorf("want 1 access log, got %d", len(access))
+	}
+	if len(access) == 1 && access[0].attrs["status"] != "500" {
+		t.Errorf("access log status = %q, want 500", access[0].attrs["status"])
 	}
 }
 
 func TestPanicRecovery_AfterWrite(t *testing.T) {
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	mem, logger := newMemLogger()
 	h := newStackWith(logger, "/", panicAfterWriteHandler())
 
 	w := httptest.NewRecorder()
@@ -245,14 +330,49 @@ func TestPanicRecovery_AfterWrite(t *testing.T) {
 	// Must not re-panic; recovery detects committed headers and aborts gracefully.
 	h.ServeHTTP(w, r)
 
-	if !strings.Contains(logBuf.String(), "panic recovered") {
-		t.Error("panic after write must still be logged")
+	// Exactly one diagnostic failure record containing request ID and panic value.
+	panics := mem.findAll("panic recovered")
+	if len(panics) != 1 {
+		t.Errorf("want 1 'panic recovered' diagnostic, got %d", len(panics))
+	}
+	if len(panics) == 1 {
+		if panics[0].level != slog.LevelError {
+			t.Errorf("diagnostic level = %v, want ERROR", panics[0].level)
+		}
+		if panics[0].attrs["request_id"] != "panic-after-write" {
+			t.Errorf("request_id = %q, want panic-after-write", panics[0].attrs["request_id"])
+		}
+		if !strings.Contains(panics[0].attrs["panic"], "panic after write") {
+			t.Errorf("panic attr = %q, want to contain panic value", panics[0].attrs["panic"])
+		}
+	}
+
+	// No JSON error must be appended after the partial body.
+	body := w.Body.String()
+	if !strings.HasPrefix(body, "partial") {
+		t.Errorf("body = %q, want to start with partial", body)
+	}
+	if strings.Contains(body, "InternalServerError") {
+		t.Error("partial-write body must not have a JSON error appended")
+	}
+
+	// Access-completion event reflects the committed status and bytes.
+	access := mem.findAll("request completed")
+	if len(access) != 1 {
+		t.Errorf("want 1 access log, got %d", len(access))
+	}
+	if len(access) == 1 {
+		if access[0].attrs["status"] != "200" {
+			t.Errorf("access log status = %q, want 200", access[0].attrs["status"])
+		}
+		if access[0].attrs["bytes"] != "7" {
+			t.Errorf("access log bytes = %q, want 7", access[0].attrs["bytes"])
+		}
 	}
 }
 
 func TestPanicRecovery_ErrAbortHandler_Repanics(t *testing.T) {
-	var logBuf bytes.Buffer
-	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+	mem, logger := newMemLogger()
 	h := newStackWith(logger, "/", panicHandler(http.ErrAbortHandler))
 
 	w := httptest.NewRecorder()
@@ -262,6 +382,10 @@ func TestPanicRecovery_ErrAbortHandler_Repanics(t *testing.T) {
 		p := recover()
 		if p != http.ErrAbortHandler {
 			t.Errorf("expected ErrAbortHandler re-panic, got %v", p)
+		}
+		// No recovery diagnostic must be emitted for http.ErrAbortHandler.
+		if panics := mem.findAll("panic recovered"); len(panics) != 0 {
+			t.Errorf("must not log 'panic recovered' for ErrAbortHandler, got %d records", len(panics))
 		}
 	}()
 	h.ServeHTTP(w, r)

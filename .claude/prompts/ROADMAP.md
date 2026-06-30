@@ -16,8 +16,9 @@
 - Go: `1.26.4`.
 - Backend использует Go standard library и `modernc.org/sqlite v1.53.0`.
 - Реализованы HTTP bootstrap, `/healthz`, конфигурация, graceful shutdown, domain models, application errors и SQLite repository.
-- `go test -race ./...` и `go vet ./...` проходят после этапа 004.
-- Docker, MinIO, Node.js, pnpm и frontend ещё не добавлены.
+- HTTP infrastructure этапов 005/005.1 реализована и проверена, включая recovery diagnostics.
+- `go test -race ./...` и `go vet ./...` проходят после этапа 005.1.
+- Docker Compose и локальный MinIO development environment добавлены; Node.js, pnpm и frontend ещё не добавлены.
 
 ## Runtime и масштабирование
 
@@ -53,15 +54,19 @@
 | `003-domain-models-and-errors` | `DONE` | Domain photo/prediction/bbox/class models, validation, UUID checks, typed safe application errors | Unit tests, race detector и vet прошли |
 | `004-sqlite-repository` | `DONE` | Read-only repository, Get/Exists/List, batched predictions, keyset pagination, same-prediction filters | Проверен вместе с hardening 004.1; race tests и vet проходят |
 | `004.1-sqlite-repository-hardening` | `DONE` | Safe SQLite URI, реальная read-only проверка, exact cursor timestamp, strict JSON EOF, stable prediction ordering | Фактический diff проверен; `go test -race ./...`, repeated tests, vet и diff check прошли |
+| `005-http-infrastructure` | `DONE` | API-key middleware, request ID, centralized errors, recovery, access logs, CORS, bounded headers | Проверен вместе с hardening 005.1; full tests, race и vet проходят |
+| `005.1-http-infrastructure-hardening` | `DONE` | Один panic diagnostic с request ID/value, безопасный 500 без утечки, отдельный access-completion log | Фактический diff проверен; full tests, race, vet и diff check прошли |
+| `006-minio-development-environment` | `DONE` | Local MinIO Compose, persistent volume, healthcheck, idempotent private bucket init, `.env.example` | Фактические файлы проверены; Compose config, health и повторный init проходят |
 
-Backend foundation через этап 004.1 закрыт. Текущий следующий этап — `005-http-infrastructure`.
+HTTP foundation и MinIO development environment через этап 006 закрыты. Следующий запланированный этап — `007-object-storage-adapter`.
 
 ## Скорректированный план следующих промтов
 
 | № | Статус | Этап | Что реализуется | Новая технология на этапе |
 |---|---|---|---|---|
-| `005` | `READY` | HTTP infrastructure | API-key middleware, correlation ID, centralized OpenAPI error writer, recovery, request logs, CORS, bounded headers/timeouts; `/healthz` остаётся публичным | Нет |
-| `006` | `PLANNED` | MinIO development environment | Docker Compose для локального external object storage, MinIO, bucket initialization, healthcheck, `.env.example`; MinIO не включается в production service memory budget | Установка Docker Engine + Compose plugin происходит только здесь |
+| `005` | `DONE` | HTTP infrastructure | API-key middleware, correlation ID, centralized OpenAPI error writer, recovery, request logs, CORS, bounded headers/timeouts; `/healthz` остаётся публичным | Нет |
+| `005.1` | `DONE` | HTTP infrastructure hardening | Исправление panic diagnostics без duplicate internal log; безопасный typed 500 и regression tests | Нет |
+| `006` | `DONE` | MinIO development environment | Docker Compose для локального external object storage, MinIO, bucket initialization, healthcheck, `.env.example`; MinIO не включается в production service memory budget | Docker Desktop + WSL Integration настроены |
 | `007` | `PLANNED` | Object storage adapter | MinIO/S3 client, presigned PUT/GET, object read, typed storage failures, configuration | Go MinIO/S3 dependency; системной установки нет |
 | `008` | `PLANNED` | Upload-link API | `POST /photos/{photoId}/upload-link`, OpenAPI DTO, auth, validation, 400/401/404/500 | Нет |
 | `009` | `PLANNED` | Seed client | Идемпотентная загрузка `dataset/images` через upload-link API, configurable concurrency с безопасным default `2`, итоговый exit code | Нет |
@@ -102,9 +107,6 @@ Backend foundation через этап 004.1 закрыт. Текущий сле
 3. `dataset/` сейчас игнорируется, но ТЗ требует запуск из чистого клона с seed/ingest. Размер dataset около 41.6 MiB, поэтому его можно закоммитить один раз обычным Git, если лицензия задания это разрешает. Иначе README должен содержать воспроизводимый способ получить dataset; без одного из этих вариантов clean-clone requirement не выполнен.
 4. Не изменять и не индексировать `dataset/predictions.db`; приложение открывает его read-only.
 
-## Запуск текущего этапа
+## Следующий этап
 
-```text
-/clear
-/implement-task @.claude/prompts/005-http-infrastructure.md
-```
+`007-object-storage-adapter` запланирован, но промт ещё не создан.

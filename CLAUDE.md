@@ -2,7 +2,12 @@
 
 ## Source of truth
 
-- Read `README.md` and `openapi.yaml` before implementing a task.
+- The active task prompt is the context manifest: read only the files and named
+  sections it lists before editing.
+- `README.md` and `openapi.yaml` remain authoritative, but do not reread them in
+  full for every task. Inspect only the relevant section or schema named by the
+  prompt. Read either file in full only for a broad audit or when the prompt
+  explicitly requires it.
 - Follow the assignment exactly. Do not add product features that were not requested.
 - Keep the solution understandable for a junior+/middle developer.
 - Prefer simple code over unnecessary abstractions.
@@ -24,7 +29,8 @@
 ## Working agreement
 
 - Work on one small task at a time.
-- Before editing, restate the goal, scope and acceptance criteria.
+- Do not spend output restating the prompt before editing. Start with a concise
+  implementation note, then inspect the scoped context and work.
 - Change only files required for the current task.
 - Explain every new production dependency.
 - Add or update relevant tests.
@@ -32,6 +38,25 @@
 - Inspect the diff before reporting completion.
 - Report checks that could not be run.
 - Never commit or push unless the user explicitly asks.
+
+## Context efficiency
+
+- Do not recursively read a directory or inspect all project files unless the
+  task is explicitly an architecture/review task.
+- Do not reread completed task prompts. The active prompt must carry forward the
+  facts needed from earlier stages.
+- Begin with `git status --short` and a diff limited to files in scope. Inspect
+  the complete repository diff only once before the final report.
+- Locate symbols with targeted search, then read the smallest coherent file or
+  section needed to change them.
+- Do not launch subagents for a small, localized task unless the prompt requires
+  independent parallel work.
+- During implementation run focused tests for the affected package. Run the full
+  formatter, test, race/type/lint, and build gate once after the code is stable.
+- Keep command output concise. Do not repeatedly print unchanged files, full
+  diffs, or successful test output.
+- Context efficiency must never weaken correctness checks, acceptance criteria,
+  secret handling, or the final quality gate.
 
 ## Important correctness areas
 

@@ -96,13 +96,16 @@ func panicRecoveryMiddleware(logger *slog.Logger) func(http.Handler) http.Handle
 					panic(p)
 				}
 				reqID := RequestIDFromContext(r.Context())
-				logger.Error("panic recovered", "request_id", reqID)
+				// Emit exactly one diagnostic containing the panic value.
+				// The panic value never appears in the client response.
+				logger.Error("panic recovered", "request_id", reqID, "panic", p)
 
 				if rw, ok := w.(*responseRecorder); ok && rw.wroteHeader {
 					// Output already started; do not append JSON to a partial body.
 					return
 				}
-				WriteError(w, r, logger, apperror.NewInternal(nil))
+				// Use a discard logger so WriteError does not emit a second diagnostic.
+				WriteError(w, r, slog.New(slog.DiscardHandler), apperror.NewInternal(nil))
 			}()
 			next.ServeHTTP(w, r)
 		})

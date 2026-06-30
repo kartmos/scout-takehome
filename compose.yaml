@@ -1,0 +1,41 @@
+name: scout
+
+services:
+  minio:
+    image: quay.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${SCOUT_S3_ACCESS_KEY:?SCOUT_S3_ACCESS_KEY is required}
+      MINIO_ROOT_PASSWORD: ${SCOUT_S3_SECRET_KEY:?SCOUT_S3_SECRET_KEY is required}
+    ports:
+      - "127.0.0.1:${SCOUT_MINIO_API_PORT:-9000}:9000"
+      - "127.0.0.1:${SCOUT_MINIO_CONSOLE_PORT:-9001}:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "mc", "ready", "local"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    restart: unless-stopped
+
+  minio-init:
+    image: quay.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MC_ALIAS_URL: http://minio:9000
+      MC_ALIAS_USER: ${SCOUT_S3_ACCESS_KEY:?SCOUT_S3_ACCESS_KEY is required}
+      MC_ALIAS_PASSWORD: ${SCOUT_S3_SECRET_KEY:?SCOUT_S3_SECRET_KEY is required}
+      SCOUT_S3_BUCKET: ${SCOUT_S3_BUCKET:?SCOUT_S3_BUCKET is required}
+    entrypoint: >
+      /bin/sh -c "
+        mc alias set local $${MC_ALIAS_URL} $${MC_ALIAS_USER} $${MC_ALIAS_PASSWORD} &&
+        mc mb --ignore-existing local/$${SCOUT_S3_BUCKET}
+      "
+    restart: "no"
+
+volumes:
+  minio-data:
