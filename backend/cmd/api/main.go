@@ -27,12 +27,17 @@ func run() int {
 	}
 
 	srv := &http.Server{
-		Addr:              cfg.HTTPAddr,
-		Handler:           httpapi.NewRouter(),
+		Addr: cfg.HTTPAddr,
+		Handler: httpapi.NewRouter(httpapi.RouterConfig{
+			Logger:         logger,
+			AllowedOrigins: cfg.CORSAllowedOrigins,
+			APIKey:         cfg.APIKey,
+		}),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTPReadTimeout,
 		WriteTimeout:      cfg.HTTPWriteTimeout,
 		IdleTimeout:       cfg.HTTPIdleTimeout,
+		MaxHeaderBytes:    cfg.HTTPMaxHeaderBytes,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
