@@ -340,6 +340,43 @@ func loadS3TTL(name string, def time.Duration) (time.Duration, error) {
 	return d, nil
 }
 
+// ThumbnailConfig holds configuration for the thumbnail generator.
+type ThumbnailConfig struct {
+	// GenerationConcurrency is the maximum number of simultaneous thumbnail
+	// generations. Kept at 1..2 to bound peak decode/encode memory.
+	GenerationConcurrency int
+}
+
+const (
+	DefaultThumbnailGenerationConcurrency = 1
+	MaxThumbnailGenerationConcurrency     = 2
+)
+
+// LoadThumbnailConfig loads thumbnail configuration from environment variables.
+func LoadThumbnailConfig() (*ThumbnailConfig, error) {
+	concurrency, err := loadThumbnailConcurrency()
+	if err != nil {
+		return nil, err
+	}
+	return &ThumbnailConfig{GenerationConcurrency: concurrency}, nil
+}
+
+func loadThumbnailConcurrency() (int, error) {
+	v := os.Getenv("SCOUT_THUMBNAIL_GENERATION_CONCURRENCY")
+	if v == "" {
+		return DefaultThumbnailGenerationConcurrency, nil
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, fmt.Errorf("SCOUT_THUMBNAIL_GENERATION_CONCURRENCY: invalid integer %q: %w", v, err)
+	}
+	if n < 1 || n > MaxThumbnailGenerationConcurrency {
+		return 0, fmt.Errorf("SCOUT_THUMBNAIL_GENERATION_CONCURRENCY: must be in [1, %d], got %d",
+			MaxThumbnailGenerationConcurrency, n)
+	}
+	return n, nil
+}
+
 // validateOrigin checks that origin is an exact http or https origin:
 // scheme + host only, no credentials, no path beyond "/", no query, no fragment.
 func validateOrigin(origin string) error {

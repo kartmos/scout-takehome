@@ -18,29 +18,28 @@ Use one fresh Claude Code context per implementation prompt. Small fixes for the
 Prompts from stage 006 onward use a scoped context manifest:
 
 - carry forward verified facts instead of rereading completed prompts;
-- name exact source and test files rather than whole directories;
+- name exact production source files rather than whole directories;
 - reference only relevant README/OpenAPI sections or component names;
 - include a scoped initial diff and avoid repeated full-project inspection;
-- use focused checks while editing and retain the complete quality gate once at
-  the end;
+- use format/build checks only during code-only stages and defer tests to the
+  designated block gate;
 - avoid task restatements and subagents for localized work.
 
-This reduces repeated input/context tokens. It does not remove acceptance
-criteria, final race/type/lint/build checks, or independent review gates.
+This reduces repeated input/context tokens while preserving the two explicit
+backend/frontend test and review gates.
 
 ## Consolidated stages after 007
 
 Related work sharing the same files and mental model may be combined into one
-prompt with explicit internal checkpoints. Each checkpoint gets focused tests;
-the prompt gets one complete final gate. Do not split a task merely because it
+production-code prompt with explicit internal checkpoints. Code-only checkpoints
+use formatting and compilation, not tests. Do not split a task merely because it
 has several files, and do not merge unrelated risk domains merely to reduce the
 prompt count.
 
-Keep separate prompts for boundaries where an independent review materially
-improves correctness: external seed/smoke, thumbnail core vs concurrent cache,
-backend acceptance, frontend gallery geometry, UI accessibility hardening, and
-final clean-clone acceptance. Corrective `.1` prompts are created only after a
-real review finding.
+Keep separate production prompts for seed, thumbnail core/cache, frontend
+foundation/gallery and viewer. Independent review and test creation happen only
+at backend gate `012` and frontend gate `015`. Corrective `.1` prompts are created
+only after findings at those gates.
 
 ## Deferred testing policy
 

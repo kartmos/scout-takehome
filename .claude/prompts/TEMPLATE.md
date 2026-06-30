@@ -10,7 +10,8 @@ earlier stages instead of asking Claude to reread completed prompts.
 Read before editing:
 
 - `CLAUDE.md`;
-- only the exact source/test files needed for this task;
+- only the exact production source files needed for a code-only task; block-gate
+  prompts may additionally name the exact test files they own;
 - only named sections or component names from `README.md`/`openapi.yaml` when
   their contract is relevant.
 
@@ -24,8 +25,8 @@ open-ended repository exploration. Do not ask Claude to restate the task.
 
 - Use targeted search and read the smallest coherent sections needed.
 - Do not inspect unrelated directories or launch subagents for a localized task.
-- During editing, run focused checks. Run the complete final quality gate once
-  after the implementation is stable.
+- During a code-only stage, format and compile only. Run tests and the complete
+  quality gate only in an explicitly designated block-gate prompt.
 - If the scoped context proves insufficient, inspect the directly connected file
   and state why; do not widen to the whole repository automatically.
 
