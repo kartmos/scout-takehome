@@ -18,6 +18,7 @@ import (
 	"scout/internal/httpapi"
 	"scout/internal/objectstorage"
 	"scout/internal/repository/sqlite"
+	"scout/internal/thumbnail"
 )
 
 // ── fixed test data ─────────────────────────────────────────────────────────
@@ -147,6 +148,13 @@ func (noopStorage) PresignDownload(context.Context, string) (objectstorage.Downl
 	return objectstorage.DownloadResult{}, nil
 }
 
+// noopThumbnailSvc satisfies thumbnailService for tests that don't exercise the thumbnail route.
+type noopThumbnailSvc struct{}
+
+func (noopThumbnailSvc) Get(context.Context, domain.Photo, thumbnail.Request) (*thumbnail.ThumbnailResult, error) {
+	return nil, nil
+}
+
 // ── router helpers ───────────────────────────────────────────────────────────
 
 func photoRouter(repo *fakeRepo, stor *fakeStorage) http.Handler {
@@ -156,6 +164,7 @@ func photoRouter(repo *fakeRepo, stor *fakeStorage) http.Handler {
 		APIKey:         testAPIKey,
 		Repo:           repo,
 		Storage:        stor,
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 }
 
@@ -191,6 +200,7 @@ func TestNewRouter_PanicsOnNilRepo(t *testing.T) {
 		APIKey:         testAPIKey,
 		Repo:           nil,
 		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 }
 
@@ -206,6 +216,23 @@ func TestNewRouter_PanicsOnNilStorage(t *testing.T) {
 		APIKey:         testAPIKey,
 		Repo:           noopRepo{},
 		Storage:        nil,
+		ThumbnailSvc:   noopThumbnailSvc{},
+	})
+}
+
+func TestNewRouter_PanicsOnNilThumbnailSvc(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Error("NewRouter must panic when ThumbnailSvc is nil")
+		}
+	}()
+	httpapi.NewRouter(httpapi.RouterConfig{
+		Logger:         discardLogger(),
+		AllowedOrigins: []string{"http://localhost:5173"},
+		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
+		ThumbnailSvc:   nil,
 	})
 }
 

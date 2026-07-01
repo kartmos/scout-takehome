@@ -14,6 +14,12 @@ import (
 	"scout/internal/objectstorage"
 )
 
+// originalOpener is the narrow interface the Generator requires from object storage.
+// It avoids a dependency on the full OriginalStorage interface and simplifies testing.
+type originalOpener interface {
+	OpenOriginal(ctx context.Context, photoID string) (io.ReadCloser, error)
+}
+
 const (
 	// MaxGenerationConcurrency is the maximum allowed value for the semaphore.
 	// It is kept at 2 to bound peak memory: each concurrent decode holds roughly
@@ -40,14 +46,15 @@ type Result struct {
 // Generator fetches originals from object storage, decodes, resizes, and JPEG-encodes them.
 // It uses a bounded semaphore to cap concurrent memory-intensive operations.
 type Generator struct {
-	storage objectstorage.OriginalStorage
+	storage originalOpener
 	// sem is a pre-filled channel used as a counting semaphore.
 	// Acquire by receiving; release by sending.
 	sem chan struct{}
 }
 
 // NewGenerator constructs a Generator. concurrency must be in [1, MaxGenerationConcurrency].
-func NewGenerator(storage objectstorage.OriginalStorage, concurrency int) *Generator {
+// storage need only implement OpenOriginal; a full objectstorage.OriginalStorage satisfies this.
+func NewGenerator(storage originalOpener, concurrency int) *Generator {
 	if concurrency < 1 || concurrency > MaxGenerationConcurrency {
 		panic(fmt.Sprintf("thumbnail: concurrency %d out of range [1, %d]",
 			concurrency, MaxGenerationConcurrency))

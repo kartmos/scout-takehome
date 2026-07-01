@@ -16,6 +16,7 @@ func productionRouter(t *testing.T) http.Handler {
 		APIKey:         testAPIKey,
 		Repo:           noopRepo{},
 		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 }
 
@@ -77,6 +78,9 @@ func TestNewRouter_PanicsOnMissingLogger(t *testing.T) {
 		Logger:         nil,
 		AllowedOrigins: []string{"http://localhost:5173"},
 		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 }
 
@@ -90,6 +94,9 @@ func TestNewRouter_PanicsOnEmptyOrigins(t *testing.T) {
 		Logger:         discardLogger(),
 		AllowedOrigins: nil,
 		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 }
 
@@ -103,5 +110,8 @@ func TestNewRouter_PanicsOnEmptyAPIKey(t *testing.T) {
 		Logger:         discardLogger(),
 		AllowedOrigins: []string{"http://localhost:5173"},
 		APIKey:         "",
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 }

@@ -352,6 +352,54 @@ const (
 	MaxThumbnailGenerationConcurrency     = 2
 )
 
+// ThumbnailCacheConfig holds configuration for the on-disk thumbnail cache.
+type ThumbnailCacheConfig struct {
+	// Dir is the root directory for the thumbnail cache.
+	// In production this must be a persistent writable volume outside the container image.
+	Dir string
+	// MaxBytes is the maximum total disk usage in bytes.
+	MaxBytes int64
+}
+
+const (
+	// DefaultThumbnailCacheDir is a safe transient default for local development only.
+	// Production deployments must set SCOUT_THUMBNAIL_CACHE_DIR to a persistent volume.
+	DefaultThumbnailCacheDir = "/tmp/scout-thumb-cache"
+	// DefaultThumbnailCacheMaxBytes is 512 MiB.
+	DefaultThumbnailCacheMaxBytes int64 = 512 * 1024 * 1024
+	// MinThumbnailCacheMaxBytes requires at least 1 MiB to ensure one small thumbnail fits.
+	MinThumbnailCacheMaxBytes int64 = 1024 * 1024
+)
+
+// LoadThumbnailCacheConfig loads thumbnail cache configuration from environment variables.
+func LoadThumbnailCacheConfig() (*ThumbnailCacheConfig, error) {
+	dir := os.Getenv("SCOUT_THUMBNAIL_CACHE_DIR")
+	if dir == "" {
+		dir = DefaultThumbnailCacheDir
+	}
+
+	maxBytesStr := os.Getenv("SCOUT_THUMBNAIL_CACHE_MAX_BYTES")
+	var maxBytes int64
+	if maxBytesStr == "" {
+		maxBytes = DefaultThumbnailCacheMaxBytes
+	} else {
+		var err error
+		maxBytes, err = strconv.ParseInt(maxBytesStr, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("SCOUT_THUMBNAIL_CACHE_MAX_BYTES: invalid integer %q: %w", maxBytesStr, err)
+		}
+		if maxBytes < MinThumbnailCacheMaxBytes {
+			return nil, fmt.Errorf("SCOUT_THUMBNAIL_CACHE_MAX_BYTES: must be at least %d bytes, got %d",
+				MinThumbnailCacheMaxBytes, maxBytes)
+		}
+	}
+
+	return &ThumbnailCacheConfig{
+		Dir:      dir,
+		MaxBytes: maxBytes,
+	}, nil
+}
+
 // LoadThumbnailConfig loads thumbnail configuration from environment variables.
 func LoadThumbnailConfig() (*ThumbnailConfig, error) {
 	concurrency, err := loadThumbnailConcurrency()

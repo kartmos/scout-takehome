@@ -3,11 +3,13 @@ package httpapi
 import (
 	"crypto/sha256"
 	"crypto/subtle"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"time"
 
 	"scout/internal/apperror"
+	"scout/internal/observability"
 )
 
 // responseRecorder captures status and bytes written for access logging.
@@ -43,10 +45,11 @@ func (rw *responseRecorder) Unwrap() http.ResponseWriter {
 	return rw.ResponseWriter
 }
 
-// accessLogMiddleware logs one completion event per request.
+// accessLogMiddleware logs one completion event per request and optionally records
+// Prometheus HTTP metrics when m is non-nil.
 // It wraps panic recovery so recovered failures are recorded with their status.
 // Never logs query strings, bodies, API keys, or auth headers.
-func accessLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
+func accessLogMiddleware(logger *slog.Logger, m *observability.Metrics) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
@@ -57,7 +60,13 @@ func accessLogMiddleware(logger *slog.Logger) func(http.Handler) http.Handler {
 			dur := time.Since(start)
 			route := r.Pattern
 			if route == "" {
-				route = r.URL.Path
+				route = "unmatched"
+			}
+
+			if m != nil {
+				statusClass := fmt.Sprintf("%dxx", rw.statusCode/100)
+				m.HTTPRequestsTotal.WithLabelValues(r.Method, route, statusClass).Inc()
+				m.HTTPDurationSeconds.WithLabelValues(r.Method, route, statusClass).Observe(dur.Seconds())
 			}
 
 			attrs := []any{

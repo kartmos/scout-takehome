@@ -107,6 +107,7 @@ func TestRequestID_Generated_WhenMissingOrInvalid(t *testing.T) {
 				APIKey:         testAPIKey,
 				Repo:           noopRepo{},
 				Storage:        noopStorage{},
+				ThumbnailSvc:   noopThumbnailSvc{},
 			})
 			_ = handler // using the production router for the healthz endpoint
 			w := httptest.NewRecorder()
@@ -140,6 +141,7 @@ func TestRequestID_AcceptedAndEchoed_WhenValid(t *testing.T) {
 		APIKey:         testAPIKey,
 		Repo:           noopRepo{},
 		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 	for _, incoming := range cases {
 		truncated := incoming
@@ -468,6 +470,46 @@ func TestAccessLog_NoAPIKey(t *testing.T) {
 	}
 }
 
+func TestAccessLog_UnmatchedRoutes_BoundedLabel(t *testing.T) {
+	// Verify that requests to unknown paths do not create high-cardinality route
+	// labels. The log must record "unmatched", never the raw request path.
+	mem, logger := newMemLogger()
+	h := httpapi.NewRouter(httpapi.RouterConfig{
+		Logger:         logger,
+		AllowedOrigins: []string{"http://localhost:5173"},
+		APIKey:         testAPIKey,
+		Repo:           noopRepo{},
+		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
+	})
+
+	unknownPaths := []string{
+		"/photos/550e8400-e29b-41d4-a716-446655440000/nonexistent",
+		"/api/v1/secret",
+		"/admin/login?token=supersecret",
+		"/550e8400-e29b-41d4-a716-446655440001/data",
+	}
+
+	for _, path := range unknownPaths {
+		w := httptest.NewRecorder()
+		r := httptest.NewRequest(http.MethodGet, path, nil)
+		r.Header.Set("X-API-Key", testAPIKey)
+		h.ServeHTTP(w, r)
+	}
+
+	logs := mem.findAll("request completed")
+	if len(logs) != len(unknownPaths) {
+		t.Fatalf("want %d access log entries, got %d", len(unknownPaths), len(logs))
+	}
+
+	for _, entry := range logs {
+		route := entry.attrs["route"]
+		if route != "unmatched" {
+			t.Errorf("route label = %q, want \"unmatched\" (raw path must not leak into metrics/logs)", route)
+		}
+	}
+}
+
 func TestAccessLog_Flusher_ViaResponseController(t *testing.T) {
 	var logBuf bytes.Buffer
 	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
@@ -508,6 +550,7 @@ func corsTestRouter(t *testing.T) http.Handler {
 		APIKey:         testAPIKey,
 		Repo:           noopRepo{},
 		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 }
 
@@ -650,6 +693,7 @@ func TestHealthz_PublicWithRequestID(t *testing.T) {
 		APIKey:         testAPIKey,
 		Repo:           noopRepo{},
 		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 
 	w := httptest.NewRecorder()
@@ -672,6 +716,7 @@ func TestHealthz_PublicWithoutAPIKey(t *testing.T) {
 		APIKey:         testAPIKey,
 		Repo:           noopRepo{},
 		Storage:        noopStorage{},
+		ThumbnailSvc:   noopThumbnailSvc{},
 	})
 
 	w := httptest.NewRecorder()

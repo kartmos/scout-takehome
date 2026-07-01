@@ -10,10 +10,15 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/promhttp"
+
 	"scout/internal/config"
 	"scout/internal/httpapi"
 	"scout/internal/objectstorage"
+	"scout/internal/observability"
 	"scout/internal/repository/sqlite"
+	"scout/internal/thumbnail"
 )
 
 func main() {
@@ -63,6 +68,55 @@ func run() (exitCode int) {
 		return 1
 	}
 
+	thumbCfg, err := config.LoadThumbnailConfig()
+	if err != nil {
+		logger.Error("thumbnail configuration error", "error", err)
+		return 1
+	}
+
+	cacheCfg, err := config.LoadThumbnailCacheConfig()
+	if err != nil {
+		logger.Error("thumbnail cache configuration error", "error", err)
+		return 1
+	}
+
+	thumbCache, err := thumbnail.NewCache(cacheCfg.Dir, cacheCfg.MaxBytes)
+	if err != nil {
+		logger.Error("thumbnail cache initialization failed", "error", err)
+		return 1
+	}
+
+	// Build a fresh Prometheus registry so this binary cannot conflict with any
+	// process-global default registry (and tests stay panic-free too).
+	reg := prometheus.NewRegistry()
+	metrics, err := observability.NewMetrics(reg, func() (int64, int, int64) {
+		s := thumbCache.Stats()
+		return s.Bytes, s.Entries, s.Evictions
+	})
+	if err != nil {
+		logger.Error("metrics registration failed", "error", err)
+		return 1
+	}
+
+	// Register signal handling before constructing the service so the signal context
+	// can be used as the generation lifetime context. Shared generation survives an
+	// individual client disconnect but stops cleanly on SIGINT/SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	thumbGen := thumbnail.NewGenerator(storage, thumbCfg.GenerationConcurrency)
+	thumbSvc := thumbnail.NewServiceWithHooks(ctx, thumbGen, thumbCache, thumbnail.ServiceHooks{
+		OnCacheHit:  metrics.ThumbCacheHitsTotal.Inc,
+		OnCacheMiss: metrics.ThumbCacheMissesTotal.Inc,
+		OnGenDone: func(dur time.Duration, err error) {
+			metrics.ThumbGenTotal.Inc()
+			metrics.ThumbGenDuration.Observe(dur.Seconds())
+			if err != nil {
+				metrics.ThumbGenErrorsTotal.Inc()
+			}
+		},
+	})
+
 	srv := &http.Server{
 		Addr: cfg.HTTPAddr,
 		Handler: httpapi.NewRouter(httpapi.RouterConfig{
@@ -71,6 +125,11 @@ func run() (exitCode int) {
 			APIKey:         cfg.APIKey,
 			Repo:           repo,
 			Storage:        storage,
+			ThumbnailSvc:   thumbSvc,
+			Metrics:        metrics,
+			MetricsHandler: promhttp.HandlerFor(reg, promhttp.HandlerOpts{
+				EnableOpenMetrics: false,
+			}),
 		}),
 		ReadHeaderTimeout: cfg.HTTPReadHeaderTimeout,
 		ReadTimeout:       cfg.HTTPReadTimeout,
@@ -78,9 +137,6 @@ func run() (exitCode int) {
 		IdleTimeout:       cfg.HTTPIdleTimeout,
 		MaxHeaderBytes:    cfg.HTTPMaxHeaderBytes,
 	}
-
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
-	defer stop()
 
 	serveErr := make(chan error, 1)
 	go func() {
