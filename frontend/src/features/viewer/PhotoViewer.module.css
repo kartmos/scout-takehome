@@ -115,7 +115,7 @@
   position: absolute;
 }
 
-/* Bbox SVG overlay – covers full media area; viewBox + preserveAspectRatio align with contain */
+/* Bbox SVG overlay – viewBox + preserveAspectRatio align with contain */
 .overlay {
   position: absolute;
   inset: 0;
@@ -143,11 +143,11 @@
   width: 220px;
   flex-shrink: 0;
   border-left: 1px solid var(--color-border);
-  padding: var(--space-md);
+  padding: var(--space-sm);
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: var(--space-sm);
+  gap: var(--space-xs);
 }
 
 @media (max-width: 600px) {
@@ -168,23 +168,48 @@
   font-style: italic;
 }
 
-.predList {
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-xs);
+/* Reset visibility button — appears above the group list when any bbox is hidden */
+.showAllBtn {
+  width: 100%;
+  padding: 4px var(--space-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  cursor: pointer;
+  text-align: center;
+  margin-bottom: var(--space-xs);
 }
 
-.predItem {
+.showAllBtn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Grouped prediction list */
+.predGroups {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-sm);
+}
+
+.predGroup {
+  opacity: 0.5;
+}
+
+.predGroupMatch {
+  opacity: 1;
+}
+
+.predGroupHeader {
   display: flex;
   align-items: center;
   gap: var(--space-xs);
-  opacity: 0.5;
   font-size: 0.8125rem;
-}
-
-.predItemMatch {
-  opacity: 1;
+  font-weight: 600;
+  color: var(--color-text);
+  margin-bottom: 2px;
 }
 
 .predSwatch {
@@ -194,18 +219,90 @@
   flex-shrink: 0;
 }
 
-.predClass {
+.predGroupCount {
+  color: var(--color-text-muted);
+  font-size: 0.75rem;
+  font-weight: 400;
+  flex-shrink: 0;
+}
+
+.predGroupLabel {
   flex: 1;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.predGroupItems {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding-left: calc(10px + var(--space-xs));
+}
+
+.predGroupItem {
+  display: flex;
+}
+
+/* Individual prediction toggle button */
+.predToggleBtn {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  width: 100%;
+  padding: 2px var(--space-xs);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  background: transparent;
+  cursor: pointer;
+  font-size: 0.75rem;
   color: var(--color-text);
+  text-align: left;
+  transition: border-color 0.1s, background-color 0.1s;
+}
+
+.predToggleBtn:hover:not(:disabled),
+.predToggleBtn:focus-visible:not(:disabled) {
+  border-color: var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 8%, transparent);
+  outline: none;
+}
+
+.predToggleBtnHidden {
+  opacity: 0.4;
+  text-decoration: line-through;
+}
+
+.predToggleBtnInvalid {
+  cursor: default;
+  opacity: 0.35;
+}
+
+.predNum {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--color-border);
+  color: var(--color-text-muted);
+  font-size: 0.6875rem;
+  font-weight: 600;
+  flex-shrink: 0;
 }
 
 .predConf {
   color: var(--color-text-muted);
   flex-shrink: 0;
+}
+
+.predNoBox {
+  font-size: 0.625rem;
+  color: var(--color-text-muted);
+  font-style: italic;
 }
 
 /* Footer navigation */

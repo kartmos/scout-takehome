@@ -75,6 +75,22 @@
   display: flex;
   align-items: center;
   gap: var(--space-xs);
+  flex-wrap: wrap;
+}
+
+.confidenceSelect {
+  padding: 3px 6px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.confidenceSelect:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
 }
 
 .pctLabel {
@@ -83,7 +99,7 @@
 }
 
 .confidenceInput {
-  width: 90px;
+  width: 80px;
   padding: 3px 8px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
@@ -112,16 +128,22 @@
   color: var(--color-accent);
 }
 
-/* Active filter summary */
+/* Active filter summary + clear button */
+.activeFilterGroup {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  align-self: flex-end;
+  flex-wrap: wrap;
+}
+
 .activeSummary {
   display: flex;
   align-items: center;
-  gap: var(--space-sm);
   padding: 3px var(--space-sm);
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-accent);
   background: color-mix(in srgb, var(--color-accent) 10%, transparent);
-  align-self: flex-end;
 }
 
 .activeSummaryText {
@@ -130,15 +152,28 @@
 }
 
 .resetBtn {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  color: var(--color-text);
   background: transparent;
-  border: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  padding: 0;
-  text-decoration: underline;
+  padding: 3px 10px;
+  text-decoration: none;
 }
 
 .resetBtn:hover {
-  color: var(--color-text);
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+  text-decoration: none;
+}
+
+.resetBtn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+  text-decoration: none;
+}
+
+.resetBtn:active {
+  text-decoration: none;
 }

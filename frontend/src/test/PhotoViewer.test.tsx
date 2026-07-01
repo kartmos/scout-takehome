@@ -516,3 +516,201 @@ describe('PhotoViewer — image states', () => {
     expect(screen.getByText('87%')).toBeInTheDocument();
   });
 });
+
+// ---------------------------------------------------------------------------
+// Additional fixture: photo with two same-class predictions.
+// ---------------------------------------------------------------------------
+const PHOTO_LIST_MULTI: typeof PHOTO_LIST_A = {
+  id: 'c3d4e5f6-a7b8-9012-cdef-123456789012',
+  x: 3,
+  y: 4,
+  h: 5,
+  width: 800,
+  height: 600,
+  capturedAt: '2024-06-03T10:00:00Z',
+  originalUrl: 'http://storage.test/stale-multi.jpg',
+  predictions: [
+    { classId: 'mirid', confidence: 0.87, bbox: { xMin: 0.1, yMin: 0.1, xMax: 0.5, yMax: 0.5 } },
+    { classId: 'mirid', confidence: 0.62, bbox: { xMin: 0.3, yMin: 0.3, xMax: 0.9, yMax: 0.9 } },
+    { classId: 'powdery_mildew', confidence: 0.45, bbox: { xMin: 0.0, yMin: 0.0, xMax: 0.3, yMax: 0.3 } },
+  ],
+};
+
+const PHOTO_FRESH_MULTI: typeof PHOTO_LIST_A = {
+  ...PHOTO_LIST_MULTI,
+  originalUrl: 'http://storage.test/fresh-multi.jpg',
+};
+
+describe('PhotoViewer — grouped sidebar and bbox visibility', () => {
+  it('same-class predictions appear as individually numbered items in the sidebar', () => {
+    mockGetPhoto.currentData = PHOTO_FRESH_MULTI;
+    renderViewer({ photos: [PHOTO_LIST_MULTI], initialIndex: 0 });
+    // Two mirid predictions → two toggle buttons numbered 1 and 2
+    const toggle1 = screen.getByRole('button', { name: /Toggle detection 1/ });
+    const toggle2 = screen.getByRole('button', { name: /Toggle detection 2/ });
+    expect(toggle1).toBeInTheDocument();
+    expect(toggle2).toBeInTheDocument();
+  });
+
+  it('each toggle button number matches its bbox number shown in the SVG', () => {
+    mockGetPhoto.currentData = PHOTO_FRESH_MULTI;
+    renderViewer({ photos: [PHOTO_LIST_MULTI], initialIndex: 0 });
+    const img = screen.getByAltText(/Greenhouse photo/);
+    fireEvent.load(img);
+    // SVG should contain text nodes "1", "2", "3"
+    const svgTexts = Array.from(document.querySelectorAll('text')).map((t) => t.textContent);
+    expect(svgTexts).toContain('1');
+    expect(svgTexts).toContain('2');
+    expect(svgTexts).toContain('3');
+  });
+
+  it('toggling a prediction hides only its bbox group', async () => {
+    const user = userEvent.setup();
+    mockGetPhoto.currentData = PHOTO_FRESH_MULTI;
+    renderViewer({ photos: [PHOTO_LIST_MULTI], initialIndex: 0 });
+    const img = screen.getByAltText(/Greenhouse photo/);
+    fireEvent.load(img);
+
+    // 3 predictions → 3 bbox groups in the SVG
+    expect(document.querySelectorAll('svg g').length).toBe(3);
+
+    // Hide detection 1
+    await user.click(screen.getByRole('button', { name: /Toggle detection 1/ }));
+    expect(document.querySelectorAll('svg g').length).toBe(2);
+    expect(screen.getByRole('button', { name: /Toggle detection 1/ })).toHaveAttribute(
+      'aria-pressed',
+      'false',
+    );
+
+    // Restore detection 1
+    await user.click(screen.getByRole('button', { name: /Toggle detection 1/ }));
+    expect(document.querySelectorAll('svg g').length).toBe(3);
+    expect(screen.getByRole('button', { name: /Toggle detection 1/ })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('keyboard Enter activates a toggle', async () => {
+    const user = userEvent.setup();
+    mockGetPhoto.currentData = PHOTO_FRESH_MULTI;
+    renderViewer({ photos: [PHOTO_LIST_MULTI], initialIndex: 0 });
+    const img = screen.getByAltText(/Greenhouse photo/);
+    fireEvent.load(img);
+
+    expect(document.querySelectorAll('svg g').length).toBe(3);
+
+    const toggle1 = screen.getByRole('button', { name: /Toggle detection 1/ });
+    await act(async () => { toggle1.focus(); });
+    await user.keyboard('{Enter}');
+    expect(document.querySelectorAll('svg g').length).toBe(2);
+  });
+
+  it('navigating to another photo resets visibility state', async () => {
+    const user = userEvent.setup();
+    mockImpl = (id) => ({
+      ...mockGetPhoto,
+      currentData:
+        id === PHOTO_LIST_MULTI.id ? PHOTO_FRESH_MULTI : PHOTO_FRESH_B,
+    });
+
+    const photos = [PHOTO_LIST_MULTI, PHOTO_LIST_B];
+    render(
+      <PhotoViewer
+        photos={photos}
+        initialIndex={0}
+        matchingClassId={null}
+        triggerEl={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const img = screen.getByAltText(/Greenhouse photo/);
+    fireEvent.load(img);
+
+    // Hide detection 1 on MULTI
+    const toggle1 = screen.getByRole('button', { name: /Toggle detection 1/ });
+    expect(toggle1).toHaveAttribute('aria-pressed', 'true');
+    await user.click(toggle1);
+    expect(toggle1).toHaveAttribute('aria-pressed', 'false');
+
+    // Navigate to B (no predictions)
+    await user.click(screen.getByRole('button', { name: 'Next photo' }));
+    expect(screen.getByText('No detections')).toBeInTheDocument();
+
+    // Navigate back to MULTI
+    await user.click(screen.getByRole('button', { name: 'Previous photo' }));
+    // Sidebar immediately shows predictions from fresh data; visibility is reset
+    const resetToggle = screen.getByRole('button', { name: /Toggle detection 1/ });
+    expect(resetToggle).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('selected-class emphasis in grouped sidebar: non-matching group is dimmed', () => {
+    mockGetPhoto.currentData = PHOTO_FRESH_MULTI;
+    renderViewer({
+      photos: [PHOTO_LIST_MULTI],
+      initialIndex: 0,
+      matchingClassId: 'mirid',
+    });
+    // Mirid group → predGroupMatch class
+    expect(screen.getByText('Mirid')).toBeInTheDocument();
+    // Powdery Mildew group present but at reduced opacity (not predGroupMatch)
+    expect(screen.getByText('Powdery Mildew')).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Threshold filtering in the viewer
+// ---------------------------------------------------------------------------
+const PHOTO_LIST_THRESH: typeof PHOTO_LIST_A = {
+  id: 'd4e5f6a7-b8c9-0123-def0-123456789013',
+  x: 4, y: 5, h: 6,
+  width: 800, height: 600,
+  capturedAt: '2024-06-04T10:00:00Z',
+  originalUrl: 'http://storage.test/stale-thresh.jpg',
+  predictions: [
+    { classId: 'mirid', confidence: 0.47, bbox: { xMin: 0.0, yMin: 0.0, xMax: 0.3, yMax: 0.3 } },
+    { classId: 'mirid', confidence: 0.52, bbox: { xMin: 0.1, yMin: 0.1, xMax: 0.5, yMax: 0.5 } },
+    { classId: 'mirid', confidence: 0.60, bbox: { xMin: 0.3, yMin: 0.3, xMax: 0.8, yMax: 0.8 } },
+  ],
+};
+const PHOTO_FRESH_THRESH: typeof PHOTO_LIST_A = {
+  ...PHOTO_LIST_THRESH,
+  originalUrl: 'http://storage.test/fresh-thresh.jpg',
+};
+
+describe('PhotoViewer — confidence threshold filtering', () => {
+  it('threshold 0.5 filters grouped list, number mapping, and toggleable bbox set', async () => {
+    const user = userEvent.setup();
+    mockGetPhoto.currentData = PHOTO_FRESH_THRESH;
+
+    render(
+      <PhotoViewer
+        photos={[PHOTO_LIST_THRESH]}
+        initialIndex={0}
+        matchingClassId={null}
+        minConfidence={0.5}
+        triggerEl={null}
+        onClose={vi.fn()}
+      />,
+    );
+
+    const img = screen.getByAltText(/Greenhouse photo/);
+    fireEvent.load(img);
+
+    // 0.47 excluded; 0.52 and 0.60 pass → 2 predictions numbered 1 and 2
+    expect(screen.getByRole('button', { name: /Toggle detection 1/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /Toggle detection 2/ })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Toggle detection 3/ })).toBeNull();
+
+    // Group header shows 2× not 3×
+    expect(screen.getByText('2×')).toBeInTheDocument();
+
+    // 2 bbox groups in SVG
+    expect(document.querySelectorAll('svg g').length).toBe(2);
+
+    // Toggling detection 1 leaves 1 bbox group
+    await user.click(screen.getByRole('button', { name: /Toggle detection 1/ }));
+    expect(document.querySelectorAll('svg g').length).toBe(1);
+  });
+});

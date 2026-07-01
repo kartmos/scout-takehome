@@ -181,6 +181,7 @@ export function GalleryPage() {
                 key={photo.id}
                 photo={photo}
                 matchingClassId={classId}
+                minConfidence={minConfidence}
                 onSelect={handleSelect}
               />
             ))}
@@ -218,6 +219,7 @@ export function GalleryPage() {
           photos={currentData.items}
           initialIndex={viewerPhotoIndex}
           matchingClassId={classId}
+          minConfidence={minConfidence}
           triggerEl={viewerTrigger}
           onClose={handleViewerClose}
         />

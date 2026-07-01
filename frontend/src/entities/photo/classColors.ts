@@ -1,10 +1,21 @@
+export const CLASS_IDS = [
+  'powdery_mildew',
+  'mirid',
+  'whitefly_aphid',
+  'miner_tuta',
+  'thrips',
+  'spider_mites',
+] as const;
+
+export type ClassIdKey = (typeof CLASS_IDS)[number];
+
 export const CLASS_COLORS: Record<string, string> = {
-  powdery_mildew: '#FF6B6B',
-  mirid: '#4ECDC4',
-  whitefly_aphid: '#60B4E5',
-  miner_tuta: '#6BCB77',
-  thrips: '#FFD93D',
-  spider_mites: '#C77DFF',
+  powdery_mildew: '#FF00A8',
+  mirid: '#0057FF',
+  whitefly_aphid: '#00D9FF',
+  miner_tuta: '#FF6B00',
+  thrips: '#FF1744',
+  spider_mites: '#8A2BE2',
 };
 
 export const CLASS_LABELS: Record<string, string> = {
