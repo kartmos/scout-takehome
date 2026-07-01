@@ -573,6 +573,107 @@ func TestLoadS3Config_Credentials(t *testing.T) {
 	}
 }
 
+func TestLoadS3Config_PublicEndpointDefaults(t *testing.T) {
+	setValidS3Env(t)
+	unsetForTest(t, "SCOUT_S3_PUBLIC_ENDPOINT")
+	unsetForTest(t, "SCOUT_S3_PUBLIC_SECURE")
+
+	cfg, err := config.LoadS3Config()
+	if err != nil {
+		t.Fatalf("LoadS3Config() error = %v", err)
+	}
+	if cfg.PublicEndpoint != cfg.Endpoint {
+		t.Errorf("PublicEndpoint = %q, want %q (same as Endpoint)", cfg.PublicEndpoint, cfg.Endpoint)
+	}
+	if cfg.PublicSecure != cfg.Secure {
+		t.Errorf("PublicSecure = %v, want %v (same as Secure)", cfg.PublicSecure, cfg.Secure)
+	}
+}
+
+func TestLoadS3Config_PublicEndpoint(t *testing.T) {
+	setValidS3Env(t)
+
+	tests := []struct {
+		name         string
+		endpoint     string
+		secure       string
+		wantEndpoint string
+		wantSecure   bool
+		wantErr      bool
+	}{
+		{
+			name:         "valid_host_port",
+			endpoint:     "minio.localhost:9000",
+			secure:       "false",
+			wantEndpoint: "minio.localhost:9000",
+			wantSecure:   false,
+		},
+		{
+			name:         "secure_public",
+			endpoint:     "s3.example.com:443",
+			secure:       "true",
+			wantEndpoint: "s3.example.com:443",
+			wantSecure:   true,
+		},
+		{
+			name:         "inherits_internal_secure_when_public_secure_unset",
+			endpoint:     "minio.localhost:9000",
+			wantEndpoint: "minio.localhost:9000",
+			wantSecure:   false, // internal SCOUT_S3_SECURE is "false" from setValidS3Env
+		},
+		{name: "with_scheme", endpoint: "http://minio.localhost:9000", wantErr: true},
+		{name: "with_path", endpoint: "minio.localhost:9000/bucket", wantErr: true},
+		{name: "with_query", endpoint: "minio.localhost:9000?x=1", wantErr: true},
+		{name: "with_credentials", endpoint: "user@minio.localhost:9000", wantErr: true},
+		{name: "invalid_port", endpoint: "minio.localhost:99999", wantErr: true},
+		{name: "whitespace", endpoint: "  minio.localhost:9000  ", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("SCOUT_S3_PUBLIC_ENDPOINT", tt.endpoint)
+			if tt.secure != "" {
+				t.Setenv("SCOUT_S3_PUBLIC_SECURE", tt.secure)
+			} else {
+				unsetForTest(t, "SCOUT_S3_PUBLIC_SECURE")
+			}
+
+			cfg, err := config.LoadS3Config()
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("LoadS3Config() error = %v, wantErr = %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+			if cfg.PublicEndpoint != tt.wantEndpoint {
+				t.Errorf("PublicEndpoint = %q, want %q", cfg.PublicEndpoint, tt.wantEndpoint)
+			}
+			if cfg.PublicSecure != tt.wantSecure {
+				t.Errorf("PublicSecure = %v, want %v", cfg.PublicSecure, tt.wantSecure)
+			}
+		})
+	}
+}
+
+func TestLoadS3Config_PublicSecureIgnoredWithoutPublicEndpoint(t *testing.T) {
+	setValidS3Env(t)
+	unsetForTest(t, "SCOUT_S3_PUBLIC_ENDPOINT")
+	// SCOUT_S3_PUBLIC_SECURE set but SCOUT_S3_PUBLIC_ENDPOINT absent — public values must equal internal.
+	t.Setenv("SCOUT_S3_PUBLIC_SECURE", "true")
+
+	cfg, err := config.LoadS3Config()
+	if err != nil {
+		t.Fatalf("LoadS3Config() error = %v", err)
+	}
+	if cfg.PublicEndpoint != cfg.Endpoint {
+		t.Errorf("PublicEndpoint = %q, want %q", cfg.PublicEndpoint, cfg.Endpoint)
+	}
+	// PublicSecure must track internal Secure (false), not the ignored SCOUT_S3_PUBLIC_SECURE.
+	if cfg.PublicSecure != cfg.Secure {
+		t.Errorf("PublicSecure = %v, want %v (must mirror internal Secure when PUBLIC_ENDPOINT absent)", cfg.PublicSecure, cfg.Secure)
+	}
+}
+
 func TestLoadS3Config_SecretNotLeaked(t *testing.T) {
 	setValidS3Env(t)
 	secretValue := "super-secret-credential-abc123"

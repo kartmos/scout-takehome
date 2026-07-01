@@ -62,15 +62,19 @@ func (realClock) Now() time.Time { return time.Now() }
 
 // MinIOAdapter implements OriginalStorage backed by a MinIO/S3-compatible store.
 type MinIOAdapter struct {
-	client      sdkClient
-	bucket      string
-	uploadTTL   time.Duration
-	downloadTTL time.Duration
-	clk         clock
+	client        sdkClient // internal operations: bucket checks and object reads
+	presignClient sdkClient // presigning only: may equal client when endpoints are the same
+	bucket        string
+	uploadTTL     time.Duration
+	downloadTTL   time.Duration
+	clk           clock
 }
 
 // New constructs a MinIOAdapter from the provided S3Config.
 // No network calls, bucket creation, or background goroutines are performed.
+// When cfg.PublicEndpoint differs from cfg.Endpoint a separate narrowly-owned
+// client is constructed for presigning so that presigned URLs carry the public
+// hostname without affecting internal storage operations.
 func New(cfg config.S3Config) (*MinIOAdapter, error) {
 	opts := &minio.Options{
 		Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
@@ -79,25 +83,45 @@ func New(cfg config.S3Config) (*MinIOAdapter, error) {
 	}
 	c, err := minio.New(cfg.Endpoint, opts)
 	if err != nil {
-		return nil, fmt.Errorf("objectstorage: construct client: %w", err)
+		return nil, fmt.Errorf("objectstorage: construct internal client: %w", err)
 	}
+	internalSDK := &realSDKClient{c: c}
+
+	// Construct a separate presign client only when the public endpoint differs.
+	// Supply Region explicitly so URL generation is deterministic without a network round trip.
+	var presignSDK sdkClient = internalSDK
+	if cfg.PublicEndpoint != cfg.Endpoint || cfg.PublicSecure != cfg.Secure {
+		pubOpts := &minio.Options{
+			Creds:  credentials.NewStaticV4(cfg.AccessKey, cfg.SecretKey, ""),
+			Secure: cfg.PublicSecure,
+			Region: cfg.Region,
+		}
+		pc, perr := minio.New(cfg.PublicEndpoint, pubOpts)
+		if perr != nil {
+			return nil, fmt.Errorf("objectstorage: construct presign client: %w", perr)
+		}
+		presignSDK = &realSDKClient{c: pc}
+	}
+
 	return &MinIOAdapter{
-		client:      &realSDKClient{c: c},
-		bucket:      cfg.Bucket,
-		uploadTTL:   cfg.UploadTTL,
-		downloadTTL: cfg.DownloadTTL,
-		clk:         realClock{},
+		client:        internalSDK,
+		presignClient: presignSDK,
+		bucket:        cfg.Bucket,
+		uploadTTL:     cfg.UploadTTL,
+		downloadTTL:   cfg.DownloadTTL,
+		clk:           realClock{},
 	}, nil
 }
 
 // newWithClient is the internal constructor for unit tests.
-func newWithClient(client sdkClient, bucket string, uploadTTL, downloadTTL time.Duration, clk clock) *MinIOAdapter {
+func newWithClient(client, presignClient sdkClient, bucket string, uploadTTL, downloadTTL time.Duration, clk clock) *MinIOAdapter {
 	return &MinIOAdapter{
-		client:      client,
-		bucket:      bucket,
-		uploadTTL:   uploadTTL,
-		downloadTTL: downloadTTL,
-		clk:         clk,
+		client:        client,
+		presignClient: presignClient,
+		bucket:        bucket,
+		uploadTTL:     uploadTTL,
+		downloadTTL:   downloadTTL,
+		clk:           clk,
 	}
 }
 
@@ -112,7 +136,7 @@ func (a *MinIOAdapter) PresignUpload(ctx context.Context, photoID, contentType s
 	extraHeaders := http.Header{}
 	extraHeaders.Set("Content-Type", contentType)
 
-	u, err := a.client.PresignHeader(ctx, "PUT", a.bucket, photoID, a.uploadTTL, nil, extraHeaders)
+	u, err := a.presignClient.PresignHeader(ctx, "PUT", a.bucket, photoID, a.uploadTTL, nil, extraHeaders)
 	if err != nil {
 		return UploadResult{}, newStorageError(OpPresignUpload, CategoryInternal, "presign failed", err)
 	}
@@ -129,7 +153,7 @@ func (a *MinIOAdapter) PresignDownload(ctx context.Context, photoID string) (Dow
 		return DownloadResult{}, newStorageError(OpPresignDownload, CategoryInvalidInput, err.Error(), err)
 	}
 
-	u, err := a.client.PresignHeader(ctx, "GET", a.bucket, photoID, a.downloadTTL, nil, nil)
+	u, err := a.presignClient.PresignHeader(ctx, "GET", a.bucket, photoID, a.downloadTTL, nil, nil)
 	if err != nil {
 		return DownloadResult{}, newStorageError(OpPresignDownload, CategoryInternal, "presign failed", err)
 	}

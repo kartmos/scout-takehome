@@ -1,0 +1,138 @@
+.controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-md);
+  align-items: flex-start;
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: 1px solid var(--color-border);
+  background: var(--color-surface);
+}
+
+.fieldset {
+  border: none;
+  padding: 0;
+  margin: 0;
+  min-inline-size: 0;
+}
+
+.legend {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: var(--space-xs);
+}
+
+.classButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.classBtn,
+.classBtnActive {
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  transition: border-color 0.1s, background-color 0.1s, color 0.1s;
+}
+
+.classBtn {
+  background: transparent;
+  color: var(--color-text-muted);
+}
+
+.classBtn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-text);
+}
+
+.classBtnActive {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: #fff;
+}
+
+/* Confidence */
+.confidenceGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-xs);
+}
+
+.label {
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.confidenceRow {
+  display: flex;
+  gap: var(--space-xs);
+}
+
+.confidenceInput {
+  width: 90px;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-size: 0.8125rem;
+}
+
+.confidenceInput:focus {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -1px;
+}
+
+.applyBtn {
+  padding: 3px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-border);
+  background: transparent;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.applyBtn:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+/* Active filter summary */
+.activeSummary {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: 3px var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-accent);
+  background: color-mix(in srgb, var(--color-accent) 10%, transparent);
+  align-self: flex-end;
+}
+
+.activeSummaryText {
+  font-size: 0.8125rem;
+  color: var(--color-accent);
+}
+
+.resetBtn {
+  font-size: 0.75rem;
+  color: var(--color-text-muted);
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.resetBtn:hover {
+  color: var(--color-text);
+}

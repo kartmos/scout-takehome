@@ -62,7 +62,7 @@ var (
 )
 
 func newTestAdapter(fake *fakeSdkClient) *MinIOAdapter {
-	return newWithClient(fake, "test-bucket", testUpTTL, testDownTTL, fixedClock{t: fixedNow})
+	return newWithClient(fake, fake, "test-bucket", testUpTTL, testDownTTL, fixedClock{t: fixedNow})
 }
 
 func mustParseURL(raw string) *url.URL {
@@ -561,6 +561,79 @@ func TestValidatePhotoID(t *testing.T) {
 		if err := validatePhotoID(id); err == nil {
 			t.Errorf("validatePhotoID(%q) = nil, want error", id)
 		}
+	}
+}
+
+// ---- Split-client (public endpoint) tests ----
+
+// TestPresignUsesPublicClient verifies that PresignUpload and PresignDownload use
+// the presign client (public endpoint) and not the internal client.
+func TestPresignUsesPublicClient(t *testing.T) {
+	internalFake := &fakeSdkClient{
+		presignFn: func(_ context.Context, _, _, _ string, _ time.Duration, _ url.Values, _ http.Header) (*url.URL, error) {
+			t.Error("internal client must not be used for presigning when a public client is configured")
+			return nil, nil
+		},
+	}
+	publicFake := &fakeSdkClient{
+		presignFn: func(_ context.Context, _, _, object string, _ time.Duration, _ url.Values, _ http.Header) (*url.URL, error) {
+			return mustParseURL("http://minio.localhost:9000/test-bucket/" + object + "?sig=abc"), nil
+		},
+	}
+	a := newWithClient(internalFake, publicFake, "test-bucket", testUpTTL, testDownTTL, fixedClock{t: fixedNow})
+
+	upRes, err := a.PresignUpload(context.Background(), validUUID, "image/jpeg")
+	if err != nil {
+		t.Fatalf("PresignUpload error: %v", err)
+	}
+	if !strings.Contains(upRes.URL, "minio.localhost") {
+		t.Errorf("PresignUpload URL %q must contain the public hostname", upRes.URL)
+	}
+
+	downRes, err := a.PresignDownload(context.Background(), validUUID)
+	if err != nil {
+		t.Fatalf("PresignDownload error: %v", err)
+	}
+	if !strings.Contains(downRes.URL, "minio.localhost") {
+		t.Errorf("PresignDownload URL %q must contain the public hostname", downRes.URL)
+	}
+}
+
+// TestInternalOperationsUseInternalClient verifies that CheckBucket and OpenOriginal
+// never use the public presign client.
+func TestInternalOperationsUseInternalClient(t *testing.T) {
+	publicCalled := false
+	publicFake := &fakeSdkClient{
+		bucketExistsFn: func(_ context.Context, _ string) (bool, error) {
+			publicCalled = true
+			return true, nil
+		},
+		getObjectFn: func(_ context.Context, _, _ string, _ minio.GetObjectOptions) (sdkObject, error) {
+			publicCalled = true
+			return nil, nil
+		},
+	}
+	internalFake := &fakeSdkClient{
+		bucketExistsFn: func(_ context.Context, _ string) (bool, error) {
+			return true, nil
+		},
+		getObjectFn: func(_ context.Context, _, _ string, _ minio.GetObjectOptions) (sdkObject, error) {
+			return &fakeSDKObject{r: bytes.NewReader([]byte("data"))}, nil
+		},
+	}
+	a := newWithClient(internalFake, publicFake, "test-bucket", testUpTTL, testDownTTL, fixedClock{t: fixedNow})
+
+	if err := a.CheckBucket(context.Background()); err != nil {
+		t.Fatalf("CheckBucket error: %v", err)
+	}
+	rc, err := a.OpenOriginal(context.Background(), validUUID)
+	if err != nil {
+		t.Fatalf("OpenOriginal error: %v", err)
+	}
+	rc.Close()
+
+	if publicCalled {
+		t.Error("public (presign) client was used for internal bucket/object operations")
 	}
 }
 

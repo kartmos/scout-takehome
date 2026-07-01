@@ -174,6 +174,12 @@ type S3Config struct {
 	Region      string
 	UploadTTL   time.Duration
 	DownloadTTL time.Duration
+	// PublicEndpoint is the host[:port] embedded in presigned URLs so browsers and
+	// the seed container can reach them. Defaults to Endpoint when unset.
+	// Never used for bucket checks or object reads.
+	PublicEndpoint string
+	// PublicSecure enables TLS in presigned URLs. Defaults to Secure when unset.
+	PublicSecure bool
 }
 
 const (
@@ -188,7 +194,7 @@ const (
 // Credential values are never included in returned error messages.
 func LoadS3Config() (*S3Config, error) {
 	endpoint := os.Getenv("SCOUT_S3_ENDPOINT")
-	if err := validateS3Endpoint(endpoint); err != nil {
+	if err := validateBareHostPort("SCOUT_S3_ENDPOINT", endpoint); err != nil {
 		return nil, err
 	}
 
@@ -227,56 +233,85 @@ func LoadS3Config() (*S3Config, error) {
 		return nil, err
 	}
 
+	// Optional public endpoint for presigned URLs. When absent, defaults to internal.
+	publicEndpoint, publicSecure, err := loadPublicS3Endpoint(endpoint, secure)
+	if err != nil {
+		return nil, err
+	}
+
 	return &S3Config{
-		Endpoint:    endpoint,
-		AccessKey:   accessKey,
-		SecretKey:   secretKey,
-		Bucket:      bucket,
-		Secure:      secure,
-		Region:      region,
-		UploadTTL:   uploadTTL,
-		DownloadTTL: downloadTTL,
+		Endpoint:       endpoint,
+		AccessKey:      accessKey,
+		SecretKey:      secretKey,
+		Bucket:         bucket,
+		Secure:         secure,
+		Region:         region,
+		UploadTTL:      uploadTTL,
+		DownloadTTL:    downloadTTL,
+		PublicEndpoint: publicEndpoint,
+		PublicSecure:   publicSecure,
 	}, nil
 }
 
-// validateS3Endpoint ensures the value is a bare host[:port] with no scheme,
+// loadPublicS3Endpoint reads SCOUT_S3_PUBLIC_ENDPOINT and SCOUT_S3_PUBLIC_SECURE.
+// When SCOUT_S3_PUBLIC_ENDPOINT is absent both default to the internal values.
+func loadPublicS3Endpoint(internalEP string, internalSecure bool) (string, bool, error) {
+	ep := os.Getenv("SCOUT_S3_PUBLIC_ENDPOINT")
+	if ep == "" {
+		return internalEP, internalSecure, nil
+	}
+	if err := validateBareHostPort("SCOUT_S3_PUBLIC_ENDPOINT", ep); err != nil {
+		return "", false, err
+	}
+	secure := internalSecure
+	if sv := os.Getenv("SCOUT_S3_PUBLIC_SECURE"); sv != "" {
+		b, err := strconv.ParseBool(sv)
+		if err != nil {
+			return "", false, fmt.Errorf("SCOUT_S3_PUBLIC_SECURE: must be a boolean (true/false/1/0), got %q", sv)
+		}
+		secure = b
+	}
+	return ep, secure, nil
+}
+
+// validateBareHostPort ensures varName's value is a bare host[:port] with no scheme,
 // credentials, path, query, fragment, or whitespace.
-func validateS3Endpoint(ep string) error {
+func validateBareHostPort(varName, ep string) error {
 	if strings.TrimSpace(ep) == "" {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must not be empty or whitespace-only")
+		return fmt.Errorf("%s must not be empty or whitespace-only", varName)
 	}
 	if strings.ContainsAny(ep, " \t\n\r") {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must not contain whitespace")
+		return fmt.Errorf("%s must not contain whitespace", varName)
 	}
 	if strings.Contains(ep, "://") {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a scheme (use host:port form)")
+		return fmt.Errorf("%s must not include a scheme (use host:port form)", varName)
 	}
 	u, err := url.Parse("dummy://" + ep)
 	if err != nil {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT is malformed: %w", err)
+		return fmt.Errorf("%s is malformed: %w", varName, err)
 	}
 	if u.User != nil {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include credentials")
+		return fmt.Errorf("%s must not include credentials", varName)
 	}
 	if u.Path != "" {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a path")
+		return fmt.Errorf("%s must not include a path", varName)
 	}
 	if u.RawQuery != "" {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a query string")
+		return fmt.Errorf("%s must not include a query string", varName)
 	}
 	if u.Fragment != "" {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must not include a fragment")
+		return fmt.Errorf("%s must not include a fragment", varName)
 	}
 	if u.Hostname() == "" {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT must specify a host")
+		return fmt.Errorf("%s must specify a host", varName)
 	}
 	if strings.HasSuffix(u.Host, ":") {
-		return fmt.Errorf("SCOUT_S3_ENDPOINT has a trailing colon with no port number")
+		return fmt.Errorf("%s has a trailing colon with no port number", varName)
 	}
 	if port := u.Port(); port != "" {
 		n, nerr := strconv.Atoi(port)
 		if nerr != nil || n < 1 || n > 65535 {
-			return fmt.Errorf("SCOUT_S3_ENDPOINT has invalid port %q", port)
+			return fmt.Errorf("%s has invalid port %q", varName, port)
 		}
 	}
 	return nil
