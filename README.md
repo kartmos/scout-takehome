@@ -11,7 +11,7 @@ This repo is the full implementation: a Go data API with an on-demand thumbnail 
 - Docker Desktop (WSL integration enabled on Windows)
 - Go 1.26+ (native backend dev)
 - Node.js 24 + pnpm 10.34.4 (native frontend dev)
-- `dataset/` present and committed (Git-visible; must be staged and committed before publishing for clean-clone reproduction)
+- `dataset/` committed (50 JPEGs + `predictions.db` are tracked in git; no extra steps needed)
 
 ---
 
@@ -324,11 +324,3 @@ To re-seed without destroying data (e.g. after adding photos):
 ```bash
 docker compose --profile seed run --rm seed
 ```
-
----
-
-## Known task-018 items
-
-- The historic `backend/api` binary blob committed in an earlier task remains in git history. It is a known hygiene item to be cleaned up in task 018 (history rewrite / `git filter-repo`). The file itself is excluded from the working tree by `.gitignore`.
-- `dataset/` files (`dataset/images/*.jpg`, `dataset/predictions.db`) are Git-visible (not in `.gitignore`) but not yet committed. They must be staged and committed before the repo is published for clean-clone reproduction.
-- **Docker runtime unverified**: image builds, the full Compose stack, browser smoke, and resource measurements listed above have not been runtime-tested in this workspace because the Docker daemon (WSL integration) is unavailable. Compose configuration has been statically validated with `docker.exe compose ... config`. Full runtime acceptance belongs to task 018.
