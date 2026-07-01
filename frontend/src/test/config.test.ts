@@ -70,9 +70,20 @@ describe('validateBaseUrl', () => {
       if (result.ok) expect(result.normalized).toBe('/api');
     });
 
-    it('accepts root / path', () => {
+    it('accepts root / and normalizes to empty string', () => {
       const result = validateBaseUrl('/');
       expect(result.ok).toBe(true);
+      if (result.ok) expect(result.normalized).toBe('');
+    });
+
+    it('root / generates /photos not //photos when used as base URL', () => {
+      const result = validateBaseUrl('/');
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        const path = `${result.normalized}/photos`;
+        expect(path).toBe('/photos');
+        expect(path.startsWith('//')).toBe(false);
+      }
     });
 
     it('rejects protocol-relative //host', () => {

@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/v7"
+
+	"scout/internal/config"
 )
 
 // fixedClock returns a deterministic time for tests.
@@ -561,6 +563,64 @@ func TestValidatePhotoID(t *testing.T) {
 		if err := validatePhotoID(id); err == nil {
 			t.Errorf("validatePhotoID(%q) = nil, want error", id)
 		}
+	}
+}
+
+// ---- Real-client public-endpoint presign regression ----
+
+// TestNewPublicPresignURL constructs the real MinIOAdapter (no fake clients) with
+// distinct internal and public endpoints and verifies that presigned URLs carry
+// the public scheme and authority. MinIO client presigning is pure local HMAC —
+// no network, DNS, or running MinIO instance is required.
+func TestNewPublicPresignURL(t *testing.T) {
+	cfg := config.S3Config{
+		Endpoint:       "minio-internal:9000",
+		PublicEndpoint: "minio.localhost:9001",
+		AccessKey:      "testaccess",
+		SecretKey:      "testsecretkeyvalue",
+		Bucket:         "scout-photos",
+		Secure:         false,
+		PublicSecure:   false,
+		Region:         "us-east-1",
+		UploadTTL:      15 * time.Minute,
+		DownloadTTL:    15 * time.Minute,
+	}
+	adapter, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New() error: %v", err)
+	}
+
+	downRes, err := adapter.PresignDownload(context.Background(), validUUID)
+	if err != nil {
+		t.Fatalf("PresignDownload error: %v", err)
+	}
+	parsed, perr := url.Parse(downRes.URL)
+	if perr != nil {
+		t.Fatalf("url.Parse(%q) error: %v", downRes.URL, perr)
+	}
+	if got, want := parsed.Host, "minio.localhost:9001"; got != want {
+		t.Errorf("download URL host = %q, want public endpoint %q", got, want)
+	}
+	if parsed.Scheme != "http" {
+		t.Errorf("download URL scheme = %q, want http", parsed.Scheme)
+	}
+	if strings.Contains(downRes.URL, "minio-internal") {
+		t.Errorf("download URL %q must not contain internal endpoint", downRes.URL)
+	}
+
+	upRes, err := adapter.PresignUpload(context.Background(), validUUID, "image/jpeg")
+	if err != nil {
+		t.Fatalf("PresignUpload error: %v", err)
+	}
+	parsed2, perr2 := url.Parse(upRes.URL)
+	if perr2 != nil {
+		t.Fatalf("url.Parse(%q) error: %v", upRes.URL, perr2)
+	}
+	if got, want := parsed2.Host, "minio.localhost:9001"; got != want {
+		t.Errorf("upload URL host = %q, want public endpoint %q", got, want)
+	}
+	if strings.Contains(upRes.URL, "minio-internal") {
+		t.Errorf("upload URL %q must not contain internal endpoint", upRes.URL)
 	}
 }
 

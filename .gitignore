@@ -1,15 +1,54 @@
-# Windows metadata files
-*:Zone.Identifier
+# Local secrets (never commit)
+.env
+.env.local
+.env.*.local
 
-# Local Claude Code and environment settings
+# Claude Code local settings
 CLAUDE.local.md
 .claude/settings.local.json
-.env
 
-# Assignment dataset is kept locally and is not committed
-dataset/
+# Windows metadata
+*:Zone.Identifier
 
-# Frontend build artifacts and dependencies
+# ── Backend ──────────────────────────────────────────────────────────────────
+# Compiled binaries (task-018 hygiene: the historic backend/api blob is a known
+# artefact in git history and will be cleaned up in task-018).
+/backend/api
+/backend/scout-api
+/backend/scout-seed
+
+# Go test cache (managed by the Go toolchain, not stored in the repo)
+/backend/testcache/
+
+# ── Frontend ─────────────────────────────────────────────────────────────────
 frontend/node_modules/
 frontend/dist/
 frontend/.vite/
+frontend/coverage/
+
+# ── Docker / runtime ─────────────────────────────────────────────────────────
+# Local compose overrides that may contain secrets
+compose.override.yaml
+compose.override.yml
+
+# Local thumbnail cache
+/tmp/scout-thumb-cache/
+
+# Temporary SQLite artefacts
+*.db-shm
+*.db-wal
+
+# ── OS and editor artefacts ───────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.iml
+
+# Recovery archives (task-018 hygiene item)
+*.tar.gz
+*.zip
+*.bak

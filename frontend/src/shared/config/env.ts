@@ -28,7 +28,7 @@ export function validateBaseUrl(raw: string): { ok: true; normalized: string } |
     if (raw.includes('..')) {
       return { ok: false, reason: 'URL must not contain path traversal sequences (..)' };
     }
-    return { ok: true, normalized: raw.replace(/\/+$/, '') || '/' };
+    return { ok: true, normalized: raw.replace(/\/+$/, '') };
   }
 
   // Absolute URL (http/https) validation.
