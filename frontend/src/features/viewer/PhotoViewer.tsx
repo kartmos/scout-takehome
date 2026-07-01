@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import type { components } from '../../entities/api/__generated__/schema';
 import { CLASS_COLORS, CLASS_LABELS, DEFAULT_CLASS_COLOR } from '../../entities/photo/classColors';
 import { isValidBBox, bboxToSvgRect } from '../../shared/lib/bbox';
+import { useGetPhotoQuery } from '../../shared/api/scoutApi';
 import styles from './PhotoViewer.module.css';
 
 type Photo = components['schemas']['Photo'];
@@ -115,11 +116,27 @@ export function PhotoViewer({
     Math.max(0, Math.min(initialIndex, photos.length - 1)),
   );
   const [imgState, setImgState] = useState<'loading' | 'loaded' | 'error'>('loading');
-  const [retryKey, setRetryKey] = useState(0);
+  const [imgRevision, setImgRevision] = useState(0);
+  // true while an explicit Retry refetch is in flight; prevents concurrent retries and
+  // stale completions via retryTokenRef.
+  const [isRetrying, setIsRetrying] = useState(false);
+  // Incremented on navigation and each retry start so a late completion can be ignored.
+  const retryTokenRef = useRef(0);
 
-  const photo = photos[currentIndex] ?? null;
+  const navPhoto = photos[currentIndex] ?? null;
+  const currentPhotoId = navPhoto?.id ?? '';
   const canPrev = currentIndex > 0;
   const canNext = currentIndex < photos.length - 1;
+
+  // Always fetch a fresh presigned URL on open and on navigation.
+  const {
+    currentData: freshPhoto,
+    isError: isFetchError,
+    refetch,
+  } = useGetPhotoQuery(currentPhotoId, {
+    skip: !currentPhotoId,
+    refetchOnMountOrArgChange: true,
+  });
 
   const handleClose = useCallback(() => {
     triggerEl?.focus();
@@ -158,24 +175,51 @@ export function PhotoViewer({
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [canPrev, canNext]);
 
-  // Reset image state when navigating to a different photo
+  // Reset image state on navigation; also invalidates any pending explicit retry.
   useEffect(() => {
+    retryTokenRef.current++;
     setImgState('loading');
-    setRetryKey(0);
-  }, [photo?.id]);
+    setImgRevision(0);
+    setIsRetrying(false);
+  }, [currentPhotoId]);
 
   // Close if the current photo has been removed (page/filter change)
   useEffect(() => {
-    if (!photo) handleClose();
-  }, [photo, handleClose]);
+    if (!navPhoto) handleClose();
+  }, [navPhoto, handleClose]);
 
-  if (!photo) return null;
+  if (!navPhoto) return null;
 
-  const capturedDate = new Date(photo.capturedAt).toLocaleDateString(undefined, {
+  const capturedDate = new Date(navPhoto.capturedAt).toLocaleDateString(undefined, {
     year: 'numeric',
     month: 'short',
     day: 'numeric',
   });
+
+  // No data and no error means we are waiting for the initial fetch (or mid-retry).
+  const isApiLoading = !freshPhoto && !isFetchError;
+  const isApiErr = !freshPhoto && isFetchError;
+
+  // Retry refetches GET /photos/{id}. Remount is driven by explicit promise
+  // completion, not URL string comparison, so same-URL presigned responses work.
+  const handleRetry = async () => {
+    if (isRetrying) return;
+    const token = ++retryTokenRef.current;
+    setIsRetrying(true);
+    try {
+      await refetch();
+      if (retryTokenRef.current === token) {
+        setImgRevision((r) => r + 1);
+        setImgState('loading');
+        setIsRetrying(false);
+      }
+    } catch {
+      if (retryTokenRef.current === token) {
+        setImgState('error');
+        setIsRetrying(false);
+      }
+    }
+  };
 
   return (
     <dialog
@@ -186,7 +230,7 @@ export function PhotoViewer({
     >
       <div className={styles.header}>
         <h2 id="viewer-title" className={styles.title}>
-          <time dateTime={photo.capturedAt}>{capturedDate}</time>
+          <time dateTime={navPhoto.capturedAt}>{capturedDate}</time>
         </h2>
         <button
           type="button"
@@ -201,47 +245,69 @@ export function PhotoViewer({
 
       <div className={styles.body}>
         <div className={styles.mediaWrap}>
-          {imgState === 'error' ? (
+          {/* Loading: initial API fetch or explicit retry in flight */}
+          {(isRetrying || isApiLoading) && (
+            <div className={styles.imgLoading} aria-label="Loading image" role="status" />
+          )}
+          {/* API-level error; hidden while a retry is in flight */}
+          {!isRetrying && isApiErr && (
             <div className={styles.imgError} role="alert">
-              <p className={styles.imgErrorMsg}>Image failed to load.</p>
-              <button
-                type="button"
-                className={styles.retryBtn}
-                onClick={() => {
-                  setImgState('loading');
-                  setRetryKey((k) => k + 1);
-                }}
-              >
+              <p className={styles.imgErrorMsg}>Failed to load photo.</p>
+              <button type="button" className={styles.retryBtn} onClick={handleRetry}>
                 Retry
               </button>
             </div>
-          ) : (
-            <>
-              {imgState === 'loading' && (
-                <div className={styles.imgLoading} aria-label="Loading image" role="status" />
-              )}
-              <img
-                key={retryKey}
-                src={photo.originalUrl}
-                alt={`Greenhouse photo captured ${capturedDate}`}
-                className={`${styles.img} ${imgState === 'loaded' ? styles.imgVisible : styles.imgHidden}`}
-                onLoad={() => setImgState('loaded')}
-                onError={() => setImgState('error')}
-              />
-              {imgState === 'loaded' && photo.predictions.length > 0 && (
-                <ViewerBBoxOverlay
-                  predictions={photo.predictions}
-                  matchingClassId={matchingClassId}
-                  photoW={photo.width}
-                  photoH={photo.height}
+          )}
+          {/* Image area; hidden while retry is in flight so remount is clean */}
+          {!isRetrying && freshPhoto && (
+            imgState === 'error' ? (
+              <div className={styles.imgError} role="alert">
+                <p className={styles.imgErrorMsg}>Image failed to load.</p>
+                <button type="button" className={styles.retryBtn} onClick={handleRetry}>
+                  Retry
+                </button>
+              </div>
+            ) : (
+              <>
+                {imgState === 'loading' && (
+                  <div className={styles.imgLoading} aria-label="Loading image" role="status" />
+                )}
+                <img
+                  key={`${currentPhotoId}-${imgRevision}`}
+                  src={freshPhoto.originalUrl}
+                  alt={`Greenhouse photo captured ${capturedDate}`}
+                  className={`${styles.img} ${imgState === 'loaded' ? styles.imgVisible : styles.imgHidden}`}
+                  onLoad={() => setImgState('loaded')}
+                  onError={() => setImgState('error')}
                 />
-              )}
-            </>
+                {imgState === 'loaded' && freshPhoto.predictions.length > 0 && (
+                  <ViewerBBoxOverlay
+                    predictions={freshPhoto.predictions}
+                    matchingClassId={matchingClassId}
+                    photoW={freshPhoto.width}
+                    photoH={freshPhoto.height}
+                  />
+                )}
+              </>
+            )
           )}
         </div>
 
         <aside className={styles.sidebar} aria-label="Photo details">
-          <PredictionList predictions={photo.predictions} matchingClassId={matchingClassId} />
+          {freshPhoto != null ? (
+            <PredictionList
+              predictions={freshPhoto.predictions}
+              matchingClassId={matchingClassId}
+            />
+          ) : isApiLoading || isRetrying ? (
+            <p
+              className={styles.noPredictions}
+              role="status"
+              aria-label="Loading detections"
+            >
+              Loading…
+            </p>
+          ) : null}
         </aside>
       </div>
 

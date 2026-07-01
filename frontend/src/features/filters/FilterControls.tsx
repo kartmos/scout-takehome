@@ -17,14 +17,15 @@ export function FilterControls() {
 
   const [confidenceInput, setConfidenceInput] = useState('');
   const confidenceId = useId();
-  // Tracks the last value committed to the store synchronously so that a blur
-  // followed immediately by a click (before React re-renders) doesn't dispatch twice.
+  // Tracks the last ratio committed to the store so that a blur followed
+  // immediately by a click (before React re-renders) doesn't dispatch twice.
   const committedRef = useRef<number | null>(minConfidence);
 
   // Sync the text field when minConfidence is cleared or set externally (e.g. resetFilters).
+  // Display as integer percentage: 0.7 → "70".
   useEffect(() => {
     committedRef.current = minConfidence;
-    setConfidenceInput(minConfidence !== null ? String(minConfidence) : '');
+    setConfidenceInput(minConfidence !== null ? String(Math.round(minConfidence * 100)) : '');
   }, [minConfidence]);
 
   const applyConfidence = () => {
@@ -36,12 +37,16 @@ export function FilterControls() {
       }
       return;
     }
-    const val = parseFloat(trimmed);
-    if (Number.isFinite(val)) {
-      const clamped = Math.max(0, Math.min(1, val));
-      if (clamped !== committedRef.current) {
-        committedRef.current = clamped;
-        dispatch(setMinConfidence(clamped));
+    const pct = Number(trimmed);
+    if (Number.isFinite(pct)) {
+      const clamped = Math.max(0, Math.min(100, pct));
+      const ratio = clamped / 100;
+      // Always normalize the visible field to the clamped value, even when Redux
+      // already holds the same ratio (e.g. input 150 → display 100, no dispatch).
+      setConfidenceInput(String(clamped));
+      if (ratio !== committedRef.current) {
+        committedRef.current = ratio;
+        dispatch(setMinConfidence(ratio));
       }
     }
   };
@@ -81,22 +86,23 @@ export function FilterControls() {
 
       <div className={styles.confidenceGroup}>
         <label htmlFor={confidenceId} className={styles.label}>
-          Min confidence
+          Minimum confidence (%)
         </label>
         <div className={styles.confidenceRow}>
           <input
             id={confidenceId}
             type="number"
             min="0"
-            max="1"
-            step="0.05"
-            placeholder="0 – 1"
+            max="100"
+            step="1"
+            placeholder="0 – 100"
             value={confidenceInput}
             onChange={(e) => setConfidenceInput(e.target.value)}
             onKeyDown={(e) => e.key === 'Enter' && applyConfidence()}
             onBlur={applyConfidence}
             className={styles.confidenceInput}
           />
+          <span aria-hidden="true" className={styles.pctLabel}>%</span>
           <button type="button" onClick={applyConfidence} className={styles.applyBtn}>
             Apply
           </button>

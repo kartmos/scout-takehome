@@ -73,7 +73,13 @@
 
 .confidenceRow {
   display: flex;
+  align-items: center;
   gap: var(--space-xs);
+}
+
+.pctLabel {
+  font-size: 0.8125rem;
+  color: var(--color-text-muted);
 }
 
 .confidenceInput {

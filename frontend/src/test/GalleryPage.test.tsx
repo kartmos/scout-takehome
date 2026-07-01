@@ -26,6 +26,7 @@ const mockQueryResult: {
 
 vi.mock('../shared/api/scoutApi', () => ({
   useListPhotosQuery: () => mockQueryResult,
+  useGetPhotoQuery: () => ({ currentData: undefined, isError: false, refetch: vi.fn() }),
   scoutApi: {
     reducerPath: 'scoutApi',
     reducer: (s = {}) => s,

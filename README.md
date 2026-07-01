@@ -19,7 +19,7 @@ This repo is the full implementation: a Go data API with an on-demand thumbnail 
 
 ```bash
 # 1. Clone and enter the repo
-git clone <repo-url> scout && cd scout
+git clone https://github.com/kartmos/scout-takehome.git scout && cd scout
 
 # 2. Copy and configure environment variables
 cp .env.example .env

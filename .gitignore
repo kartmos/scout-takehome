@@ -11,8 +11,7 @@ CLAUDE.local.md
 *:Zone.Identifier
 
 # ── Backend ──────────────────────────────────────────────────────────────────
-# Compiled binaries (task-018 hygiene: the historic backend/api blob is a known
-# artefact in git history and will be cleaned up in task-018).
+# Compiled binaries
 /backend/api
 /backend/scout-api
 /backend/scout-seed
@@ -48,7 +47,7 @@ Thumbs.db
 .vscode/
 *.iml
 
-# Recovery archives (task-018 hygiene item)
+# Recovery archives
 *.tar.gz
 *.zip
 *.bak
