@@ -53,11 +53,11 @@ func (e *AppError) Violations() []FieldViolation {
 }
 
 const (
-	fallbackValidationMsg      = "request validation failed"
-	fallbackAuthMsg            = "authentication required"
-	fallbackNotFoundMsg        = "resource not found"
-	fallbackResourceID         = "unknown"
-	internalMsg                = "an internal error occurred"
+	fallbackValidationMsg       = "request validation failed"
+	fallbackAuthMsg             = "authentication required"
+	fallbackNotFoundMsg         = "resource not found"
+	fallbackResourceID          = "unknown"
+	internalMsg                 = "an internal error occurred"
 	fallbackMethodNotAllowedMsg = "method not allowed"
 )
 
