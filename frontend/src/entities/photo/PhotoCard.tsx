@@ -61,9 +61,10 @@ export interface PhotoCardProps {
   matchingClassId?: string | null;
   minConfidence?: number | null;
   onSelect?: (photo: Photo, trigger: HTMLButtonElement) => void;
+  highlighted?: boolean;
 }
 
-export function PhotoCard({ photo, matchingClassId, minConfidence, onSelect }: PhotoCardProps) {
+export function PhotoCard({ photo, matchingClassId, minConfidence, onSelect, highlighted }: PhotoCardProps) {
   const [imgError, setImgError] = useState(false);
   const [retryKey, setRetryKey] = useState(0);
 
@@ -95,7 +96,10 @@ export function PhotoCard({ photo, matchingClassId, minConfidence, onSelect }: P
   const isThresholdFiltered = !hasVisiblePredictions && photo.predictions.length > 0;
 
   return (
-    <article className={styles.card}>
+    <article
+      className={`${styles.card} ${highlighted ? styles.cardHighlighted : ''}`}
+      data-highlighted={highlighted ? 'true' : undefined}
+    >
       <div className={styles.media}>
         {isInvalidId ? (
           <div className={styles.imgError}>

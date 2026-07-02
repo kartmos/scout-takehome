@@ -1,8 +1,10 @@
-import { useState } from 'react';
+import { useMemo, useState } from 'react';
 import { useAppDispatch, useAppSelector } from '../../app/hooks';
 import { resetFilters } from '../../features/filters/filtersSlice';
 import { FilterControls } from '../../features/filters/FilterControls';
 import { PhotoViewer } from '../../features/viewer/PhotoViewer';
+import { GreenhouseMap, type MapLocation } from '../../features/map/GreenhouseMap';
+import { isNear } from '../../features/map/mapGeometry';
 import { useListPhotosQuery } from '../../shared/api/scoutApi';
 import { PhotoCard } from '../../entities/photo/PhotoCard';
 import type { ApiError } from '../../shared/lib/apiError';
@@ -13,6 +15,7 @@ type Photo = components['schemas']['Photo'];
 
 const PAGE_SIZE = 24;
 const SKELETON_COUNT = 12;
+const MAP_LIMIT = 200;
 
 function isApiError(err: unknown): err is ApiError {
   return typeof err === 'object' && err !== null && 'message' in err;
@@ -90,29 +93,52 @@ export function GalleryPage() {
 
   const cursor = effectiveCursors[effectivePageIndex];
 
-  // Build args without undefined values — required by exactOptionalPropertyTypes
   const queryArgs: { limit: number; cursor?: string; classId?: string; minConfidence?: number } =
     { limit: PAGE_SIZE };
   if (cursor !== undefined) queryArgs.cursor = cursor;
   if (classId !== null) queryArgs.classId = classId;
   if (minConfidence !== null) queryArgs.minConfidence = minConfidence;
 
-  // currentData is undefined until the active query args have been fulfilled once.
-  // Unlike `data`, it never carries results from a previous page or filter set.
   const { currentData, isFetching, isError, error, refetch } =
     useListPhotosQuery(queryArgs);
 
-  // Viewer selection: track by ID so we can detect page/filter invalidation.
-  // viewerPhotoIndex === -1 when the photo is no longer in currentData (filter/page change),
-  // which naturally collapses isViewerOpen without needing an explicit close effect.
+  // ── Map drawer state ──────────────────────────────────────────────────────
+  const [drawerMode, setDrawerMode] = useState<'hidden' | 'compact' | 'expanded'>('hidden');
+  const [selectedLocation, setSelectedLocation] = useState<MapLocation | null>(null);
+  const [mapHighlightedPhotoId, setMapHighlightedPhotoId] = useState<string | null>(null);
+  const [mapEnabled, setMapEnabled] = useState(false);
+
+  const handleModeChange = (mode: 'hidden' | 'compact' | 'expanded') => {
+    if (!mapEnabled && mode !== 'hidden') setMapEnabled(true);
+    setDrawerMode(mode);
+  };
+
+  const mapQueryArgs: { limit: number; classId?: string; minConfidence?: number } =
+    { limit: MAP_LIMIT };
+  if (classId !== null) mapQueryArgs.classId = classId;
+  if (minConfidence !== null) mapQueryArgs.minConfidence = minConfidence;
+
+  const {
+    currentData: mapData,
+    isFetching: mapFetching,
+    isError: mapError,
+    refetch: mapRefetch,
+  } = useListPhotosQuery(mapQueryArgs, { skip: !mapEnabled });
+
+  // Photos within 3 m of the selected location (intersects class/confidence via mapData)
+  const nearPhotos = useMemo<Photo[]>(() => {
+    if (selectedLocation === null || !mapData) return [];
+    return mapData.items.filter((p) => isNear(p.x, p.y, selectedLocation.x, selectedLocation.y));
+  }, [selectedLocation, mapData]);
+
+  // ── Viewer state ──────────────────────────────────────────────────────────
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
   const [viewerTrigger, setViewerTrigger] = useState<HTMLElement | null>(null);
 
+  // Navigate within nearPhotos when a location is selected; otherwise current page
+  const viewerList: Photo[] = selectedLocation !== null ? nearPhotos : (currentData?.items ?? []);
   const viewerPhotoIndex =
-    selectedPhotoId && currentData
-      ? currentData.items.findIndex((p) => p.id === selectedPhotoId)
-      : -1;
-
+    selectedPhotoId ? viewerList.findIndex((p) => p.id === selectedPhotoId) : -1;
   const isViewerOpen = viewerPhotoIndex !== -1;
 
   const handleSelect = (photo: Photo, trigger: HTMLButtonElement) => {
@@ -142,13 +168,12 @@ export function GalleryPage() {
   };
 
   const hasActiveFilters = classId !== null || minConfidence !== null;
-  // currentData is undefined until the active query args are fulfilled → no stale page shown.
   const showGrid = !!currentData && currentData.items.length > 0;
   const showEmpty = !isError && !!currentData && currentData.items.length === 0;
-  // Background-refetch: current args fulfilled; a new fetch of the same key is in progress.
   const isBackgroundFetch = !!currentData && isFetching;
-  // Initial fetch: current args not yet fulfilled (no cached result for these args).
   const isInitialFetch = !currentData && isFetching && !isError;
+
+  const isLocationMode = selectedLocation !== null;
 
   return (
     <div className={styles.page}>
@@ -163,60 +188,130 @@ export function GalleryPage() {
 
         {isError && <ErrorPanel error={error} onRetry={refetch} />}
 
-        {showEmpty && (
-          <EmptyPanel
-            hasFilters={hasActiveFilters}
-            onReset={() => dispatch(resetFilters())}
-          />
+        {/* ── Location-filter mode ──────────────────────────────────── */}
+        {isLocationMode && (
+          <>
+            <div className={styles.locationChip}>
+              <span className={styles.locationLabel}>
+                Near x&nbsp;{selectedLocation.x.toFixed(1)}&nbsp;m,
+                y&nbsp;{selectedLocation.y.toFixed(1)}&nbsp;m
+                &nbsp;·&nbsp;{nearPhotos.length}&nbsp;photo{nearPhotos.length !== 1 ? 's' : ''}
+              </span>
+              <button
+                type="button"
+                className={styles.clearLocationBtn}
+                onClick={() => { setSelectedLocation(null); setMapHighlightedPhotoId(null); }}
+              >
+                × Clear location
+              </button>
+            </div>
+
+            {mapFetching && !mapData && <SkeletonGrid />}
+
+            {!mapFetching && nearPhotos.length > 0 && (
+              <div
+                className={styles.grid}
+                aria-label={`Photos near x ${selectedLocation.x.toFixed(1)} m, y ${selectedLocation.y.toFixed(1)} m`}
+              >
+                {nearPhotos.map((photo) => (
+                  <PhotoCard
+                    key={photo.id}
+                    photo={photo}
+                    matchingClassId={classId}
+                    minConfidence={minConfidence}
+                    onSelect={handleSelect}
+                    highlighted={photo.id === mapHighlightedPhotoId}
+                  />
+                ))}
+              </div>
+            )}
+
+            {!mapFetching && nearPhotos.length === 0 && (
+              <div className={styles.emptyPanel}>
+                <p className={styles.emptyMsg}>
+                  No photos within 3 m of this location
+                  {hasActiveFilters ? ' match current filters.' : '.'}
+                </p>
+                <button
+                  type="button"
+                  className={styles.retryBtn}
+                  onClick={() => { setSelectedLocation(null); setMapHighlightedPhotoId(null); }}
+                >
+                  Clear location
+                </button>
+                {hasActiveFilters && (
+                  <button
+                    type="button"
+                    className={styles.retryBtn}
+                    onClick={() => dispatch(resetFilters())}
+                  >
+                    Clear filters
+                  </button>
+                )}
+              </div>
+            )}
+          </>
         )}
 
-        {showGrid && (
-          <div
-            className={styles.grid}
-            aria-busy={isBackgroundFetch}
-            aria-label="Photo gallery"
-          >
-            {currentData.items.map((photo) => (
-              <PhotoCard
-                key={photo.id}
-                photo={photo}
-                matchingClassId={classId}
-                minConfidence={minConfidence}
-                onSelect={handleSelect}
+        {/* ── Normal gallery mode ───────────────────────────────────── */}
+        {!isLocationMode && (
+          <>
+            {showEmpty && (
+              <EmptyPanel
+                hasFilters={hasActiveFilters}
+                onReset={() => dispatch(resetFilters())}
               />
-            ))}
-          </div>
-        )}
+            )}
 
-        {(showGrid || showEmpty) && (
-          <nav className={styles.pagination} aria-label="Gallery pagination">
-            <button
-              type="button"
-              onClick={handlePrev}
-              disabled={effectivePageIndex === 0 || isFetching}
-              className={styles.pageBtn}
-            >
-              Previous
-            </button>
-            <span className={styles.pageInfo} aria-live="polite" aria-atomic="true">
-              Page {effectivePageIndex + 1}
-              {!currentData?.next_token && currentData ? ' (last)' : ''}
-            </span>
-            <button
-              type="button"
-              onClick={handleNext}
-              disabled={!currentData?.next_token || isFetching}
-              className={styles.pageBtn}
-            >
-              Next
-            </button>
-          </nav>
+            {showGrid && (
+              <div
+                className={styles.grid}
+                aria-busy={isBackgroundFetch}
+                aria-label="Photo gallery"
+              >
+                {currentData.items.map((photo) => (
+                  <PhotoCard
+                    key={photo.id}
+                    photo={photo}
+                    matchingClassId={classId}
+                    minConfidence={minConfidence}
+                    onSelect={handleSelect}
+                  />
+                ))}
+              </div>
+            )}
+
+            {(showGrid || showEmpty) && (
+              <nav className={styles.pagination} aria-label="Gallery pagination">
+                <button
+                  type="button"
+                  onClick={handlePrev}
+                  disabled={effectivePageIndex === 0 || isFetching}
+                  className={styles.pageBtn}
+                >
+                  Previous
+                </button>
+                <span className={styles.pageInfo} aria-live="polite" aria-atomic="true">
+                  Page {effectivePageIndex + 1}
+                  {!currentData?.next_token && currentData ? ' (last)' : ''}
+                </span>
+                <button
+                  type="button"
+                  onClick={handleNext}
+                  disabled={!currentData?.next_token || isFetching}
+                  className={styles.pageBtn}
+                >
+                  Next
+                </button>
+              </nav>
+            )}
+          </>
         )}
       </div>
 
-      {isViewerOpen && currentData && (
+      {isViewerOpen && (
         <PhotoViewer
-          photos={currentData.items}
+          photos={viewerList}
           initialIndex={viewerPhotoIndex}
           matchingClassId={classId}
           minConfidence={minConfidence}
@@ -224,6 +319,22 @@ export function GalleryPage() {
           onClose={handleViewerClose}
         />
       )}
+
+      <GreenhouseMap
+        mode={drawerMode}
+        onModeChange={handleModeChange}
+        selectedLocation={selectedLocation}
+        onSelectLocation={setSelectedLocation}
+        highlightedPhotoId={mapHighlightedPhotoId}
+        onHighlightPhoto={setMapHighlightedPhotoId}
+        classId={classId}
+        minConfidence={minConfidence}
+        mapPhotos={mapData?.items ?? []}
+        mapFetching={mapFetching}
+        mapError={mapError}
+        onRetry={mapRefetch}
+        hasMore={!!mapData?.next_token}
+      />
     </div>
   );
 }

@@ -1,0 +1,706 @@
+import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { Stage, Layer, Rect, Circle, Line, Text, Group } from 'react-konva';
+import type Konva from 'konva';
+import type { components } from '../../entities/api/__generated__/schema';
+import { CLASS_COLORS, DEFAULT_CLASS_COLOR } from '../../entities/photo/classColors';
+import {
+  WORLD_SIZE,
+  NEAR_RADIUS_METRES,
+  DRAG_THRESHOLD_PX,
+  MAP_PADDING,
+  type ViewState,
+  worldToStage,
+  stageToWorld,
+  isValidWorldCoord,
+  isNear,
+  computePixelsPerMetre,
+  initialViewState,
+  resetViewState,
+  viewStateToLayerTransform,
+  applyPan,
+  applyZoomAtPoint,
+  applyZoomAtCenter,
+  MIN_SCALE,
+  MAX_SCALE,
+  ZOOM_STEP,
+} from './mapGeometry';
+import styles from './GreenhouseMap.module.css';
+
+type Photo = components['schemas']['Photo'];
+
+export interface MapLocation {
+  x: number;
+  y: number;
+}
+
+export interface GreenhouseMapProps {
+  mode: 'hidden' | 'compact' | 'expanded';
+  onModeChange: (mode: 'hidden' | 'compact' | 'expanded') => void;
+  selectedLocation: MapLocation | null;
+  onSelectLocation: (loc: MapLocation | null) => void;
+  highlightedPhotoId: string | null;
+  onHighlightPhoto: (id: string | null) => void;
+  classId: string | null;
+  minConfidence: number | null;
+  mapPhotos: Photo[];
+  mapFetching: boolean;
+  mapError: boolean;
+  onRetry: () => void;
+  hasMore: boolean;
+}
+
+// ─── Bed decoration (schematic, does not represent real data) ────────────────
+
+const BEDS = [
+  { label: 'Bed 1', worldY1: 0, worldY2: WORLD_SIZE / 3 },
+  { label: 'Bed 2', worldY1: WORLD_SIZE / 3, worldY2: (2 * WORLD_SIZE) / 3 },
+  { label: 'Bed 3', worldY1: (2 * WORLD_SIZE) / 3, worldY2: WORLD_SIZE },
+];
+
+const GRID_TICKS = [0, 5, 10, 15, 20, 25, 30, 35, 40] as const;
+
+const MARKER_OUTER_RADIUS = 10;
+const MARKER_INNER_RADIUS = 5;
+const NEAR_CIRCLE_STROKE = 1.5;
+
+// ─── Colour helper ───────────────────────────────────────────────────────────
+
+function getMarkerColor(photo: Photo, classId: string | null, minConfidence: number | null): string {
+  if (classId !== null) return CLASS_COLORS[classId] ?? DEFAULT_CLASS_COLOR;
+  const eligible = photo.predictions
+    .filter((p) => minConfidence === null || p.confidence >= minConfidence)
+    .sort((a, b) => b.confidence - a.confidence);
+  if (eligible.length > 0) return CLASS_COLORS[eligible[0]!.classId] ?? DEFAULT_CLASS_COLOR;
+  return DEFAULT_CLASS_COLOR;
+}
+
+// ─── Konva canvas sub-component ──────────────────────────────────────────────
+
+interface KonvaMapCanvasProps {
+  viewState: ViewState;
+  onViewChange: (v: ViewState) => void;
+  selectedLocation: MapLocation | null;
+  onSelectLocation: (loc: MapLocation | null) => void;
+  highlightedPhotoId: string | null;
+  onHighlightPhoto: (id: string | null) => void;
+  classId: string | null;
+  minConfidence: number | null;
+  mapPhotos: Photo[];
+  mapFetching: boolean;
+  mapError: boolean;
+  onRetry: () => void;
+  hasMore: boolean;
+  compact: boolean;
+}
+
+function KonvaMapCanvas({
+  viewState,
+  onViewChange,
+  selectedLocation,
+  onSelectLocation,
+  highlightedPhotoId,
+  onHighlightPhoto,
+  classId,
+  minConfidence,
+  mapPhotos,
+  mapFetching,
+  mapError,
+  onRetry,
+  hasMore,
+  compact,
+}: KonvaMapCanvasProps) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const stageRef = useRef<Konva.Stage>(null);
+  const [stageSize, setStageSize] = useState({ w: 320, h: 240 });
+  const [hoveredId, setHoveredId] = useState<string | null>(null);
+  const [listExpanded, setListExpanded] = useState(false);
+
+  // Mutable refs to read current values in event handlers without stale closures
+  const viewRef = useRef(viewState);
+  viewRef.current = viewState;
+  const stageSizeRef = useRef(stageSize);
+  stageSizeRef.current = stageSize;
+
+  const mouseStartRef = useRef<{ x: number; y: number } | null>(null);
+  const lastMousePosRef = useRef<{ x: number; y: number } | null>(null);
+  const isDraggingRef = useRef(false);
+
+  // ResizeObserver — update stage dimensions and re-clamp transform
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const entry = entries[0];
+      if (!entry) return;
+      const { width, height } = entry.contentRect;
+      if (width > 0 && height > 0) {
+        const newSize = { w: Math.floor(width), h: Math.floor(height) };
+        setStageSize(newSize);
+        // Re-clamp position for new size (applyPan with zero delta just clamps)
+        onViewChange(applyPan(viewRef.current, 0, 0, newSize.w, newSize.h));
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+    // onViewChange intentionally omitted — stable callback via useCallback in parent
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const { w: stageW, h: stageH } = stageSize;
+  const ppm = computePixelsPerMetre(stageW, stageH, MAP_PADDING);
+  const layerTransform = viewStateToLayerTransform(viewState, stageW, stageH);
+  const scale = layerTransform.scale;
+  const invScale = scale > 0 ? 1 / scale : 1;
+
+  const validPhotos = useMemo(
+    () => mapPhotos.filter((p) => isValidWorldCoord(p.x, p.y)),
+    [mapPhotos],
+  );
+  const omittedCount = mapPhotos.length - validPhotos.length;
+
+  // ── Event helpers ─────────────────────────────────────────────────────────
+
+  function getPointerPos() {
+    return stageRef.current?.getPointerPosition() ?? null;
+  }
+
+  // ── Pan/drag handling ─────────────────────────────────────────────────────
+
+  const handleMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    void e;
+    isDraggingRef.current = false; // reset at start of each interaction
+    const pos = getPointerPos();
+    if (!pos) return;
+    mouseStartRef.current = pos;
+    lastMousePosRef.current = pos;
+  }, []);
+
+  const handleMouseMove = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    void e;
+    if (!mouseStartRef.current) return;
+    const pos = getPointerPos();
+    if (!pos) return;
+    const dx = pos.x - mouseStartRef.current.x;
+    const dy = pos.y - mouseStartRef.current.y;
+    if (!isDraggingRef.current && Math.hypot(dx, dy) > DRAG_THRESHOLD_PX) {
+      isDraggingRef.current = true;
+    }
+    if (isDraggingRef.current && lastMousePosRef.current) {
+      const moveDx = pos.x - lastMousePosRef.current.x;
+      const moveDy = pos.y - lastMousePosRef.current.y;
+      const ss = stageSizeRef.current;
+      onViewChange(applyPan(viewRef.current, moveDx, moveDy, ss.w, ss.h));
+    }
+    lastMousePosRef.current = pos;
+  }, [onViewChange]);
+
+  const handleMouseUp = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    void e;
+    mouseStartRef.current = null;
+    lastMousePosRef.current = null;
+    // NOTE: isDraggingRef.current is NOT reset here; it must persist until onClick fires
+  }, []);
+
+  // ── Background click (fires only when a shape does not cancel bubbling) ───
+
+  const handleStageClick = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
+    const wasDragging = isDraggingRef.current;
+    isDraggingRef.current = false;
+    if (wasDragging) return;
+    if (e.target !== (stageRef.current as unknown as Konva.Node)) return; // shape click
+    const pos = getPointerPos();
+    if (!pos) return;
+    const t = viewRef.current;
+    const ss = stageSizeRef.current;
+    const lt = viewStateToLayerTransform(t, ss.w, ss.h);
+    const localX = (pos.x - lt.x) / t.scale;
+    const localY = (pos.y - lt.y) / t.scale;
+    const ppmLocal = computePixelsPerMetre(ss.w, ss.h, MAP_PADDING);
+    const world = stageToWorld(localX, localY, ppmLocal, MAP_PADDING);
+    if (isValidWorldCoord(world.x, world.y)) {
+      onSelectLocation({ x: world.x, y: world.y });
+      onHighlightPhoto(null);
+    }
+  }, [onSelectLocation, onHighlightPhoto]);
+
+  // ── Wheel zoom ────────────────────────────────────────────────────────────
+
+  const handleWheel = useCallback((e: Konva.KonvaEventObject<WheelEvent>) => {
+    e.evt.preventDefault();
+    const pos = getPointerPos();
+    if (!pos) return;
+    const factor = e.evt.deltaY < 0 ? ZOOM_STEP : 1 / ZOOM_STEP;
+    const ss = stageSizeRef.current;
+    onViewChange(applyZoomAtPoint(viewRef.current, factor, pos.x, pos.y, ss.w, ss.h));
+  }, [onViewChange]);
+
+  // ── Zoom button handlers ──────────────────────────────────────────────────
+
+  const handleZoomIn = useCallback(() => {
+    const ss = stageSizeRef.current;
+    onViewChange(applyZoomAtCenter(viewRef.current, ZOOM_STEP, ss.w, ss.h));
+  }, [onViewChange]);
+
+  const handleZoomOut = useCallback(() => {
+    const ss = stageSizeRef.current;
+    onViewChange(applyZoomAtCenter(viewRef.current, 1 / ZOOM_STEP, ss.w, ss.h));
+  }, [onViewChange]);
+
+  const handleReset = useCallback(() => {
+    onViewChange(resetViewState());
+  }, [onViewChange]);
+
+  // ── Marker click ──────────────────────────────────────────────────────────
+
+  function makeMarkerClickHandler(photo: Photo) {
+    return (e: Konva.KonvaEventObject<MouseEvent>) => {
+      e.cancelBubble = true;
+      const wasDragging = isDraggingRef.current;
+      isDraggingRef.current = false;
+      if (wasDragging) return;
+      onSelectLocation({ x: photo.x, y: photo.y });
+      onHighlightPhoto(photo.id);
+    };
+  }
+
+  // ── Accessible DOM list ───────────────────────────────────────────────────
+
+  const handleListSelect = useCallback((photo: Photo) => {
+    onSelectLocation({ x: photo.x, y: photo.y });
+    onHighlightPhoto(photo.id);
+  }, [onSelectLocation, onHighlightPhoto]);
+
+  // ── Derived geometry ──────────────────────────────────────────────────────
+
+  const plotTop = MAP_PADDING;
+  const plotLeft = MAP_PADDING;
+  const plotSizePx = WORLD_SIZE * ppm;
+
+  return (
+    <div className={styles.canvasContainer}>
+      {/* Konva canvas */}
+      <div ref={containerRef} className={styles.stageWrapper} data-testid="map-stage-wrapper">
+        {stageW > 0 && stageH > 0 && (
+          <Stage
+            ref={stageRef}
+            width={stageW}
+            height={stageH}
+            onMouseDown={handleMouseDown}
+            onMouseMove={handleMouseMove}
+            onMouseUp={handleMouseUp}
+            onClick={handleStageClick}
+            onWheel={handleWheel}
+            data-testid="konva-stage"
+          >
+            <Layer
+              x={layerTransform.x}
+              y={layerTransform.y}
+              scaleX={scale}
+              scaleY={scale}
+            >
+              {/* Bed backgrounds (schematic decoration only) */}
+              {BEDS.map(({ label, worldY1, worldY2 }) => {
+                const top = worldToStage(0, worldY2, ppm, MAP_PADDING).y;
+                const bot = worldToStage(0, worldY1, ppm, MAP_PADDING).y;
+                return (
+                  <Group key={label}>
+                    <Rect
+                      x={plotLeft}
+                      y={top}
+                      width={plotSizePx}
+                      height={bot - top}
+                      fill="rgba(48,72,32,0.12)"
+                      stroke="rgba(122,154,96,0.25)"
+                      strokeWidth={0.5 * invScale}
+                      listening={false}
+                    />
+                    <Text
+                      x={plotLeft + 4 * invScale}
+                      y={top + 4 * invScale}
+                      text={label}
+                      fontSize={9 * invScale}
+                      fill="rgba(122,154,96,0.65)"
+                      listening={false}
+                    />
+                  </Group>
+                );
+              })}
+
+              {/* Grid lines (vertical + horizontal per tick) */}
+              {GRID_TICKS.map((m) => {
+                const sx = worldToStage(m, 0, ppm, MAP_PADDING).x;
+                const hy = worldToStage(0, m, ppm, MAP_PADDING).y;
+                const stroke = (m === 0 || m === WORLD_SIZE)
+                  ? 'rgba(200,200,200,0.3)'
+                  : 'rgba(200,200,200,0.12)';
+                const sw = 0.5 * invScale;
+                return (
+                  <Group key={`g${m}`}>
+                    <Line
+                      points={[sx, plotTop, sx, plotTop + plotSizePx]}
+                      stroke={stroke}
+                      strokeWidth={sw}
+                      listening={false}
+                    />
+                    <Line
+                      points={[plotLeft, hy, plotLeft + plotSizePx, hy]}
+                      stroke={stroke}
+                      strokeWidth={sw}
+                      listening={false}
+                    />
+                  </Group>
+                );
+              })}
+
+              {/* Axis labels at inner ticks */}
+              {GRID_TICKS.filter((m) => m > 0 && m < WORLD_SIZE).map((m) => {
+                const sx = worldToStage(m, 0, ppm, MAP_PADDING).x;
+                const hy = worldToStage(0, m, ppm, MAP_PADDING).y;
+                const fs = 8 * invScale;
+                return (
+                  <Group key={`label${m}`}>
+                    <Text
+                      x={sx - 6 * invScale}
+                      y={plotTop + plotSizePx + 3 * invScale}
+                      text={String(m)}
+                      fontSize={fs}
+                      fill="rgba(180,180,180,0.6)"
+                      listening={false}
+                    />
+                    <Text
+                      x={plotLeft - 22 * invScale}
+                      y={hy - 4 * invScale}
+                      text={String(m)}
+                      fontSize={fs}
+                      fill="rgba(180,180,180,0.6)"
+                      listening={false}
+                    />
+                  </Group>
+                );
+              })}
+
+              {/* Metres legend */}
+              <Text
+                x={plotLeft + plotSizePx / 2 - 15 * invScale}
+                y={plotTop + plotSizePx + 14 * invScale}
+                text="metres"
+                fontSize={7 * invScale}
+                fill="rgba(150,150,150,0.5)"
+                listening={false}
+              />
+
+              {/* Photo markers — positioned from real x,y */}
+              {validPhotos.map((photo) => {
+                const local = worldToStage(photo.x, photo.y, ppm, MAP_PADDING);
+                const color = getMarkerColor(photo, classId, minConfidence);
+                const isHovered = hoveredId === photo.id;
+                const isHighlighted = highlightedPhotoId === photo.id;
+                const outerR = (isHovered ? MARKER_OUTER_RADIUS * 1.3 : MARKER_OUTER_RADIUS) * invScale;
+                return (
+                  <Group
+                    key={photo.id}
+                    onClick={makeMarkerClickHandler(photo)}
+                    onMouseEnter={() => setHoveredId(photo.id)}
+                    onMouseLeave={() => setHoveredId(null)}
+                  >
+                    <Circle
+                      x={local.x}
+                      y={local.y}
+                      radius={outerR}
+                      fill={isHighlighted ? `${color}66` : `${color}33`}
+                      stroke={color}
+                      strokeWidth={(isHighlighted ? 3 : isHovered ? 2 : 1.5) * invScale}
+                    />
+                    <Circle
+                      x={local.x}
+                      y={local.y}
+                      radius={MARKER_INNER_RADIUS * invScale}
+                      fill={color}
+                      listening={false}
+                    />
+                  </Group>
+                );
+              })}
+
+              {/* Selection radius circle + centre dot */}
+              {selectedLocation !== null && (() => {
+                const local = worldToStage(selectedLocation.x, selectedLocation.y, ppm, MAP_PADDING);
+                return (
+                  <Group>
+                    <Circle
+                      x={local.x}
+                      y={local.y}
+                      radius={NEAR_RADIUS_METRES * ppm}
+                      fill="rgba(79,142,247,0.12)"
+                      stroke="rgba(79,142,247,0.55)"
+                      strokeWidth={NEAR_CIRCLE_STROKE * invScale}
+                      listening={false}
+                    />
+                    <Circle
+                      x={local.x}
+                      y={local.y}
+                      radius={5 * invScale}
+                      fill="#4F8EF7"
+                      stroke="#fff"
+                      strokeWidth={1.5 * invScale}
+                      listening={false}
+                    />
+                  </Group>
+                );
+              })()}
+            </Layer>
+          </Stage>
+        )}
+
+        {mapFetching && validPhotos.length === 0 && !mapError && (
+          <div className={styles.canvasOverlay} role="status">Loading map data…</div>
+        )}
+        {mapError && (
+          <div className={styles.canvasOverlay} role="alert">
+            <p>Failed to load map data.</p>
+            <button type="button" className={styles.retryBtn} onClick={onRetry}>Retry</button>
+          </div>
+        )}
+      </div>
+
+      {/* Zoom controls */}
+      <div className={styles.zoomControls} role="group" aria-label="Map zoom controls">
+        <button
+          type="button"
+          className={styles.zoomBtn}
+          aria-label="Zoom in"
+          onClick={handleZoomIn}
+          disabled={viewState.scale >= MAX_SCALE}
+        >
+          +
+        </button>
+        <button
+          type="button"
+          className={styles.zoomBtn}
+          aria-label="Zoom out"
+          onClick={handleZoomOut}
+          disabled={viewState.scale <= MIN_SCALE}
+        >
+          −
+        </button>
+        <button
+          type="button"
+          className={styles.zoomBtn}
+          aria-label="Reset view"
+          onClick={handleReset}
+        >
+          ⊙
+        </button>
+      </div>
+
+      {/* Map status line */}
+      <p className={styles.mapMeta} aria-live="polite" aria-atomic="true">
+        {validPhotos.length} marker{validPhotos.length !== 1 ? 's' : ''}
+        {omittedCount > 0 && ` · ${omittedCount} omitted (invalid coords)`}
+        {hasMore && ' · Showing first 200 matching photos'}
+      </p>
+
+      {/* Accessible DOM location list */}
+      <div className={styles.locationListWrapper}>
+        {compact && (
+          <button
+            type="button"
+            className={styles.listToggle}
+            aria-expanded={listExpanded}
+            aria-controls="map-location-list"
+            onClick={() => setListExpanded((v) => !v)}
+          >
+            {listExpanded ? '▲ Hide location list' : '▼ Show location list'}
+          </button>
+        )}
+        {(!compact || listExpanded) && (
+          <ul
+            id="map-location-list"
+            className={styles.locationList}
+            aria-label="Photo locations"
+          >
+            {validPhotos.map((photo) => {
+              const isNearSelected = selectedLocation !== null &&
+                isNear(photo.x, photo.y, selectedLocation.x, selectedLocation.y);
+              const capturedLabel = new Date(photo.capturedAt).toLocaleString();
+              return (
+                <li
+                  key={photo.id}
+                  className={`${styles.locationItem} ${isNearSelected ? styles.locationItemNear : ''}`}
+                >
+                  <button
+                    type="button"
+                    className={styles.locationBtn}
+                    title={`Captured: ${capturedLabel} · height ${photo.h.toFixed(1)} m · ${photo.predictions.length} prediction(s)`}
+                    onClick={() => handleListSelect(photo)}
+                  >
+                    x&nbsp;{photo.x.toFixed(1)}&nbsp;m, y&nbsp;{photo.y.toFixed(1)}&nbsp;m
+                  </button>
+                </li>
+              );
+            })}
+            {validPhotos.length === 0 && !mapFetching && !mapError && (
+              <li className={styles.locationEmpty}>No photos in this view.</li>
+            )}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Drawer shell ─────────────────────────────────────────────────────────────
+
+export function GreenhouseMap({
+  mode,
+  onModeChange,
+  selectedLocation,
+  onSelectLocation,
+  highlightedPhotoId,
+  onHighlightPhoto,
+  classId,
+  minConfidence,
+  mapPhotos,
+  mapFetching,
+  mapError,
+  onRetry,
+  hasMore,
+}: GreenhouseMapProps) {
+  const dialogRef = useRef<HTMLDialogElement>(null);
+  const expandBtnRef = useRef<HTMLButtonElement>(null);
+  const launcherRef = useRef<HTMLButtonElement>(null);
+  const modeAfterClose = useRef<'compact' | 'hidden'>('compact');
+  const prevModeRef = useRef(mode);
+
+  const [viewState, setViewState] = useState<ViewState>(initialViewState);
+
+  useEffect(() => {
+    if (mode === 'expanded') {
+      modeAfterClose.current = 'compact';
+      if (dialogRef.current && !dialogRef.current.open) {
+        dialogRef.current.showModal();
+      }
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    const prev = prevModeRef.current;
+    prevModeRef.current = mode;
+    if (prev === 'expanded') {
+      if (mode === 'compact') expandBtnRef.current?.focus();
+      else if (mode === 'hidden') launcherRef.current?.focus();
+    }
+  }, [mode]);
+
+  const handleViewChange = useCallback((v: ViewState) => setViewState(v), []);
+
+  const canvasProps: KonvaMapCanvasProps = {
+    viewState,
+    onViewChange: handleViewChange,
+    selectedLocation,
+    onSelectLocation,
+    highlightedPhotoId,
+    onHighlightPhoto,
+    classId,
+    minConfidence,
+    mapPhotos,
+    mapFetching,
+    mapError,
+    onRetry,
+    hasMore,
+    compact: mode === 'compact',
+  };
+
+  // ── Hidden: launcher button ────────────────────────────────────────────────
+
+  if (mode === 'hidden') {
+    return (
+      <button
+        ref={launcherRef}
+        type="button"
+        className={styles.launcher}
+        aria-label={
+          selectedLocation !== null
+            ? `Show greenhouse map, location x ${selectedLocation.x.toFixed(1)} m y ${selectedLocation.y.toFixed(1)} m active`
+            : 'Show greenhouse map'
+        }
+        onClick={() => onModeChange('compact')}
+      >
+        Greenhouse map
+        {selectedLocation !== null && (
+          <span className={styles.launcherBadge} aria-hidden="true">●</span>
+        )}
+      </button>
+    );
+  }
+
+  // ── Compact: fixed bottom-right drawer ────────────────────────────────────
+
+  if (mode === 'compact') {
+    return (
+      <div className={styles.compact} role="region" aria-label="Greenhouse map">
+        <div className={styles.drawerHeader}>
+          <span className={styles.drawerTitle}>Greenhouse map</span>
+          <button
+            ref={expandBtnRef}
+            type="button"
+            className={styles.headerBtn}
+            aria-label="Expand map"
+            onClick={() => onModeChange('expanded')}
+          >
+            Expand
+          </button>
+          <button
+            type="button"
+            className={styles.headerBtn}
+            aria-label="Hide map"
+            onClick={() => onModeChange('hidden')}
+          >
+            Hide
+          </button>
+        </div>
+        <KonvaMapCanvas {...canvasProps} compact={true} />
+      </div>
+    );
+  }
+
+  // ── Expanded: native dialog ───────────────────────────────────────────────
+
+  return (
+    <dialog
+      ref={dialogRef}
+      className={styles.expandedDialog}
+      aria-label="Greenhouse map"
+      onClose={() => onModeChange(modeAfterClose.current)}
+    >
+      <div className={styles.drawerHeader}>
+        <span className={styles.drawerTitle}>Greenhouse map</span>
+        <button
+          type="button"
+          className={styles.headerBtn}
+          aria-label="Return to mini-map"
+          onClick={() => {
+            modeAfterClose.current = 'compact';
+            dialogRef.current?.close();
+          }}
+        >
+          Mini-map
+        </button>
+        <button
+          type="button"
+          className={styles.headerBtn}
+          aria-label="Hide map"
+          onClick={() => {
+            modeAfterClose.current = 'hidden';
+            dialogRef.current?.close();
+          }}
+        >
+          Hide
+        </button>
+      </div>
+      <div className={styles.dialogBody}>
+        <KonvaMapCanvas {...canvasProps} compact={false} />
+      </div>
+    </dialog>
+  );
+}

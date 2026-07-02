@@ -13,7 +13,6 @@
   display: flex;
   flex-direction: column;
   gap: var(--space-lg);
-  /* Prevent horizontal overflow */
   max-width: 100%;
 }
 
@@ -152,4 +151,46 @@
   color: var(--color-text-muted);
   min-width: 80px;
   text-align: center;
+}
+
+/* Location filter chip (shown when a map point is selected) */
+.locationChip {
+  display: flex;
+  align-items: center;
+  gap: var(--space-md);
+  padding: var(--space-sm) var(--space-md);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-accent);
+  background: rgba(79, 142, 247, 0.08);
+  flex-wrap: wrap;
+}
+
+.locationLabel {
+  font-size: 0.875rem;
+  color: var(--color-accent);
+  font-weight: 600;
+  flex: 1;
+  white-space: nowrap;
+}
+
+.clearLocationBtn {
+  padding: 2px var(--space-sm);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--color-accent);
+  background: transparent;
+  color: var(--color-accent);
+  font-size: 0.8125rem;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.1s, color 0.1s;
+}
+
+.clearLocationBtn:hover {
+  background: var(--color-accent);
+  color: #fff;
+}
+
+.clearLocationBtn:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }

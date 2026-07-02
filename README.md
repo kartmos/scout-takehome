@@ -2,7 +2,13 @@
 
 Scout is an early-warning system for greenhouse crops. Cameras photograph the crop around the clock; a computer-vision model flags pests and diseases with bounding boxes; growers open Scout to see what was found, filter to a class or confidence, and pinpoint where in the greenhouse it is happening.
 
-This repo is the full implementation: a Go data API with an on-demand thumbnail engine, a React/TypeScript gallery/viewer, and a Docker Compose stack that wires them together.
+This repo is the full implementation: a Go data API with an on-demand thumbnail engine, a React/TypeScript gallery/viewer with an interactive Konva greenhouse map drawer, and a Docker Compose stack that wires them together.
+
+### Frontend views
+
+**Gallery** — responsive paginated grid. Each card shows a thumbnail with bounding-box overlay, grouped detection counts, and opens a full-screen viewer with navigation, bounding-box toggling, and presigned original URLs.
+
+**Greenhouse map** — an optional Konva-canvas floor plan, opened via a bottom-right launcher button. The map renders a 40 × 40 m world with three horizontal plant beds and photo markers drawn from real `x`/`y` coordinates stored in the database. The drawer has three states: **hidden** (compact launcher only), **compact** (a fixed ~380 × 280 px panel), and **expanded** (a viewer-sized modal dialog with Escape/focus-return support). Zoom (1×–6×) and pan are supported; marker size stays constant on screen across zoom levels. Clicking anywhere on the map canvas selects that world location and filters the gallery to photos within a **3 m radius**, intersected with any active class and confidence filters. The selected location is shown as a chip with a **Clear location** button; normal cursor pagination resumes when the filter is cleared. A single bounded query of up to 200 matching photos backs the map; if the catalog has more, a disclosure is shown. The map query is skipped until the drawer is first opened.
 
 ---
 
@@ -302,7 +308,6 @@ The thumbnail cache (default 256 MiB) is a **disk volume**, not memory. Disk bud
 - **SQLite read-only**: `predictions.db` is mounted read-only; the API cannot corrupt or modify it. All writes at ingest time go through the seed binary and the object storage API.
 - **No rate limiting**: the API has no built-in rate limiting. Use a reverse proxy or WAF for production workloads.
 - **Single-instance singleflight**: the thumbnail dedup singleflight is in-process only. With multiple API replicas, duplicate generation is possible across instances. For this project's target of one small box this is not a concern.
-- **No optional greenhouse map**: task 016 (map view) is not implemented.
 
 ---
 

@@ -5,7 +5,11 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
-  transition: border-color 0.15s ease;
+}
+
+.cardHighlighted {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
 }
 
 .card:has(.selectBtn:focus-visible) {
