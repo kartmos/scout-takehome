@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
-import { Stage, Layer, Rect, Circle, Line, Text, Group } from 'react-konva';
+import { Stage, Layer, Circle, Line, Text, Group, Image as KonvaImage } from 'react-konva';
+import bgSrc from '../../assets/greenhouse-map-background.png';
 import type Konva from 'konva';
 import type { components } from '../../entities/api/__generated__/schema';
 import { CLASS_COLORS, DEFAULT_CLASS_COLOR } from '../../entities/photo/classColors';
@@ -49,19 +50,38 @@ export interface GreenhouseMapProps {
   hasMore: boolean;
 }
 
-// ─── Bed decoration (schematic, does not represent real data) ────────────────
-
-const BEDS = [
-  { label: 'Bed 1', worldY1: 0, worldY2: WORLD_SIZE / 3 },
-  { label: 'Bed 2', worldY1: WORLD_SIZE / 3, worldY2: (2 * WORLD_SIZE) / 3 },
-  { label: 'Bed 3', worldY1: (2 * WORLD_SIZE) / 3, worldY2: WORLD_SIZE },
-];
-
 const GRID_TICKS = [0, 5, 10, 15, 20, 25, 30, 35, 40] as const;
 
 const MARKER_OUTER_RADIUS = 10;
 const MARKER_INNER_RADIUS = 5;
 const NEAR_CIRCLE_STROKE = 1.5;
+
+// Grid
+const GRID_STROKE_EDGE  = 'rgba(200,200,200,0.3)';
+const GRID_STROKE_INNER = 'rgba(200,200,200,0.12)';
+const GRID_STROKE_WIDTH = 0.5;
+
+// Axis labels and scale legend
+const AXIS_LABEL_FONT_SIZE = 8;
+const AXIS_LABEL_FILL      = 'rgba(180,180,180,0.6)';
+const LEGEND_FONT_SIZE     = 7;
+const LEGEND_FILL          = 'rgba(150,150,150,0.5)';
+
+// Photo markers
+const MARKER_HOVER_SCALE            = 1.3;
+const MARKER_FILL_ALPHA             = '33'; // hex opacity suffix (~20%)
+const MARKER_FILL_HIGHLIGHTED_ALPHA = '66'; // hex opacity suffix (~40%)
+const MARKER_STROKE_HIGHLIGHTED     = 3;
+const MARKER_STROKE_HOVERED         = 2;
+const MARKER_STROKE_NORMAL          = 1.5;
+
+// Selection indicator
+const SELECTION_COLOR            = '#4F8EF7';
+const SELECTION_FILL             = 'rgba(79,142,247,0.12)';
+const SELECTION_STROKE           = 'rgba(79,142,247,0.55)';
+const SELECTION_DOT_RADIUS       = 5;
+const SELECTION_DOT_STROKE       = '#fff';
+const SELECTION_DOT_STROKE_WIDTH = 1.5;
 
 // ─── Colour helper ───────────────────────────────────────────────────────────
 
@@ -116,6 +136,7 @@ function KonvaMapCanvas({
   const [stageSize, setStageSize] = useState({ w: 320, h: 240 });
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [listExpanded, setListExpanded] = useState(false);
+  const [backgroundImage, setBackgroundImage] = useState<HTMLImageElement | null>(null);
 
   const viewRef = useRef(viewState);
   viewRef.current = viewState;
@@ -125,6 +146,22 @@ function KonvaMapCanvas({
   const mouseStartRef = useRef<{ x: number; y: number } | null>(null);
   const lastMousePosRef = useRef<{ x: number; y: number } | null>(null);
   const isDraggingRef = useRef(false);
+
+  // Load greenhouse floor-plan background image; failure leaves map functional
+  useEffect(() => {
+    let cancelled = false;
+    const img = new window.Image();
+    img.onload = () => {
+      if (!cancelled) setBackgroundImage(img);
+    };
+    img.onerror = () => {};
+    img.src = bgSrc;
+    return () => {
+      cancelled = true;
+      img.onload = null;
+      img.onerror = null;
+    };
+  }, []);
 
   // ResizeObserver — update stage dimensions and re-clamp transform
   useEffect(() => {
@@ -298,42 +335,27 @@ function KonvaMapCanvas({
               scaleX={scale}
               scaleY={scale}
             >
-              {/* Bed backgrounds (schematic decoration only) */}
-              {BEDS.map(({ label, worldY1, worldY2 }) => {
-                const top = worldToStage(0, worldY2, ppm, MAP_PADDING).y;
-                const bot = worldToStage(0, worldY1, ppm, MAP_PADDING).y;
-                return (
-                  <Group key={label}>
-                    <Rect
-                      x={plotLeft}
-                      y={top}
-                      width={plotSizePx}
-                      height={bot - top}
-                      fill="rgba(48,72,32,0.12)"
-                      stroke="rgba(122,154,96,0.25)"
-                      strokeWidth={0.5 * invScale}
-                      listening={false}
-                    />
-                    <Text
-                      x={plotLeft + 4 * invScale}
-                      y={top + 4 * invScale}
-                      text={label}
-                      fontSize={9 * invScale}
-                      fill="rgba(122,154,96,0.65)"
-                      listening={false}
-                    />
-                  </Group>
-                );
-              })}
+              {/* Greenhouse floor-plan background — 60% opacity, follows zoom/pan */}
+              {backgroundImage !== null && (
+                <KonvaImage
+                  image={backgroundImage}
+                  x={plotLeft}
+                  y={plotTop}
+                  width={plotSizePx}
+                  height={plotSizePx}
+                  opacity={0.6}
+                  listening={false}
+                />
+              )}
 
               {/* Grid lines (vertical + horizontal per tick) */}
               {GRID_TICKS.map((m) => {
                 const sx = worldToStage(m, 0, ppm, MAP_PADDING).x;
                 const hy = worldToStage(0, m, ppm, MAP_PADDING).y;
                 const stroke = (m === 0 || m === WORLD_SIZE)
-                  ? 'rgba(200,200,200,0.3)'
-                  : 'rgba(200,200,200,0.12)';
-                const sw = 0.5 * invScale;
+                  ? GRID_STROKE_EDGE
+                  : GRID_STROKE_INNER;
+                const sw = GRID_STROKE_WIDTH * invScale;
                 return (
                   <Group key={`g${m}`}>
                     <Line
@@ -356,7 +378,7 @@ function KonvaMapCanvas({
               {GRID_TICKS.filter((m) => m > 0 && m < WORLD_SIZE).map((m) => {
                 const sx = worldToStage(m, 0, ppm, MAP_PADDING).x;
                 const hy = worldToStage(0, m, ppm, MAP_PADDING).y;
-                const fs = 8 * invScale;
+                const fs = AXIS_LABEL_FONT_SIZE * invScale;
                 return (
                   <Group key={`label${m}`}>
                     <Text
@@ -364,7 +386,7 @@ function KonvaMapCanvas({
                       y={plotTop + plotSizePx + 3 * invScale}
                       text={String(m)}
                       fontSize={fs}
-                      fill="rgba(180,180,180,0.6)"
+                      fill={AXIS_LABEL_FILL}
                       listening={false}
                     />
                     <Text
@@ -372,7 +394,7 @@ function KonvaMapCanvas({
                       y={hy - 4 * invScale}
                       text={String(m)}
                       fontSize={fs}
-                      fill="rgba(180,180,180,0.6)"
+                      fill={AXIS_LABEL_FILL}
                       listening={false}
                     />
                   </Group>
@@ -384,8 +406,8 @@ function KonvaMapCanvas({
                 x={plotLeft + plotSizePx / 2 - 15 * invScale}
                 y={plotTop + plotSizePx + 14 * invScale}
                 text="metres"
-                fontSize={7 * invScale}
-                fill="rgba(150,150,150,0.5)"
+                fontSize={LEGEND_FONT_SIZE * invScale}
+                fill={LEGEND_FILL}
                 listening={false}
               />
 
@@ -395,7 +417,7 @@ function KonvaMapCanvas({
                 const color = getMarkerColor(photo, classId, minConfidence);
                 const isHovered = hoveredId === photo.id;
                 const isHighlighted = highlightedPhotoId === photo.id;
-                const outerR = (isHovered ? MARKER_OUTER_RADIUS * 1.3 : MARKER_OUTER_RADIUS) * invScale;
+                const outerR = (isHovered ? MARKER_OUTER_RADIUS * MARKER_HOVER_SCALE : MARKER_OUTER_RADIUS) * invScale;
                 return (
                   <Group
                     key={photo.id}
@@ -407,9 +429,9 @@ function KonvaMapCanvas({
                       x={local.x}
                       y={local.y}
                       radius={outerR}
-                      fill={isHighlighted ? `${color}66` : `${color}33`}
+                      fill={isHighlighted ? `${color}${MARKER_FILL_HIGHLIGHTED_ALPHA}` : `${color}${MARKER_FILL_ALPHA}`}
                       stroke={color}
-                      strokeWidth={(isHighlighted ? 3 : isHovered ? 2 : 1.5) * invScale}
+                      strokeWidth={(isHighlighted ? MARKER_STROKE_HIGHLIGHTED : isHovered ? MARKER_STROKE_HOVERED : MARKER_STROKE_NORMAL) * invScale}
                     />
                     <Circle
                       x={local.x}
@@ -431,18 +453,18 @@ function KonvaMapCanvas({
                       x={local.x}
                       y={local.y}
                       radius={NEAR_RADIUS_METRES * ppm}
-                      fill="rgba(79,142,247,0.12)"
-                      stroke="rgba(79,142,247,0.55)"
+                      fill={SELECTION_FILL}
+                      stroke={SELECTION_STROKE}
                       strokeWidth={NEAR_CIRCLE_STROKE * invScale}
                       listening={false}
                     />
                     <Circle
                       x={local.x}
                       y={local.y}
-                      radius={5 * invScale}
-                      fill="#4F8EF7"
-                      stroke="#fff"
-                      strokeWidth={1.5 * invScale}
+                      radius={SELECTION_DOT_RADIUS * invScale}
+                      fill={SELECTION_COLOR}
+                      stroke={SELECTION_DOT_STROKE}
+                      strokeWidth={SELECTION_DOT_STROKE_WIDTH * invScale}
                       listening={false}
                     />
                   </Group>

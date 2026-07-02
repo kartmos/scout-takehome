@@ -5,7 +5,7 @@
  * location list is used as the primary testable interaction surface.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, screen, fireEvent, cleanup } from '@testing-library/react';
+import { render, screen, fireEvent, cleanup, act } from '@testing-library/react';
 import { forwardRef } from 'react';
 import type { ForwardedRef } from 'react';
 import type { components } from '../entities/api/__generated__/schema';
@@ -82,6 +82,25 @@ vi.mock('react-konva', () => {
       />
     ),
     Line: () => <div data-testid="konva-line" />,
+    Image: ({ x, y, width, height, opacity, listening }: {
+      image?: HTMLImageElement;
+      x?: number;
+      y?: number;
+      width?: number;
+      height?: number;
+      opacity?: number;
+      listening?: boolean;
+    }) => (
+      <div
+        data-testid="konva-image"
+        data-x={x}
+        data-y={y}
+        data-width={width}
+        data-height={height}
+        data-opacity={opacity}
+        data-listening={String(listening)}
+      />
+    ),
     Text: ({ text }: { text?: string }) => <span data-testid="konva-text">{text}</span>,
     Group: ({ children, onClick, onMouseEnter, onMouseLeave }: {
       children?: React.ReactNode;
@@ -806,5 +825,106 @@ describe('GreenhouseMap — mode transition', () => {
     rerender(<GreenhouseMap {...props} mode="expanded" selectedLocation={loc} />);
     expect(document.querySelector('dialog')).toBeInTheDocument();
     expect(screen.getByTestId('konva-stage')).toBeInTheDocument();
+  });
+});
+
+// ─── Background image ───────────────────────────────────────────────────────
+
+describe('GreenhouseMap — background image', () => {
+  interface MockImg {
+    onload: (() => void) | null;
+    onerror: (() => void) | null;
+    src: string;
+  }
+
+  let lastMockImg: MockImg | null = null;
+
+  beforeEach(() => {
+    lastMockImg = null;
+    vi.stubGlobal('Image', class implements MockImg {
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      src = '';
+      constructor() {
+        // eslint-disable-next-line @typescript-eslint/no-this-alias
+        lastMockImg = this;
+      }
+    });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('does not render Bed 1, Bed 2, or Bed 3', () => {
+    renderMap({ mode: 'compact' });
+    expect(screen.queryByText('Bed 1')).toBeNull();
+    expect(screen.queryByText('Bed 2')).toBeNull();
+    expect(screen.queryByText('Bed 3')).toBeNull();
+  });
+
+  it('background node does not appear before image loads', () => {
+    renderMap({ mode: 'compact' });
+    expect(screen.queryByTestId('konva-image')).toBeNull();
+  });
+
+  it('background node appears after successful image load', () => {
+    renderMap({ mode: 'compact' });
+    act(() => { lastMockImg?.onload?.(); });
+    expect(screen.getByTestId('konva-image')).toBeInTheDocument();
+  });
+
+  it('background node has opacity 0.6 and listening false', () => {
+    renderMap({ mode: 'compact' });
+    act(() => { lastMockImg?.onload?.(); });
+    const img = screen.getByTestId('konva-image');
+    expect(img).toHaveAttribute('data-opacity', '0.6');
+    expect(img).toHaveAttribute('data-listening', 'false');
+  });
+
+  it('background node is positioned at plot bounds (square, same x and y padding)', () => {
+    renderMap({ mode: 'compact' });
+    act(() => { lastMockImg?.onload?.(); });
+    const img = screen.getByTestId('konva-image');
+    const w = img.getAttribute('data-width');
+    const h = img.getAttribute('data-height');
+    expect(Number(w)).toBeGreaterThan(0);
+    expect(w).toBe(h);
+    expect(img.getAttribute('data-x')).toBe(img.getAttribute('data-y'));
+  });
+
+  it('background node is rendered before grid lines (first visible child of layer)', () => {
+    renderMap({ mode: 'compact' });
+    act(() => { lastMockImg?.onload?.(); });
+    const layer = screen.getByTestId('konva-layer');
+    const children = Array.from(layer.children);
+    const imgIdx = children.findIndex((el) => el.getAttribute('data-testid') === 'konva-image');
+    const groupIdx = children.findIndex((el) => el.getAttribute('data-testid') === 'konva-group');
+    expect(imgIdx).toBeGreaterThanOrEqual(0);
+    expect(imgIdx).toBeLessThan(groupIdx);
+  });
+
+  it('failed image load leaves the functional map visible without background', () => {
+    renderMap({ mode: 'compact' });
+    act(() => { lastMockImg?.onerror?.(); });
+    expect(screen.queryByTestId('konva-image')).toBeNull();
+    expect(screen.getByTestId('konva-stage')).toBeInTheDocument();
+  });
+
+  it('incomplete load (neither onload nor onerror) leaves the functional map visible', () => {
+    renderMap({ mode: 'compact' });
+    expect(screen.queryByTestId('konva-image')).toBeNull();
+    expect(screen.getByTestId('konva-stage')).toBeInTheDocument();
+  });
+
+  it('background click still reaches the selection path when background is present', () => {
+    mockPointerPos = { x: 160, y: 140 };
+    const { onSelectLocation } = renderMap({ mode: 'compact' });
+    act(() => { lastMockImg?.onload?.(); });
+    const stage = screen.getByTestId('konva-stage');
+    fireEvent.mouseDown(stage);
+    fireEvent.mouseUp(stage);
+    fireEvent.click(stage);
+    expect(onSelectLocation).toHaveBeenCalled();
   });
 });

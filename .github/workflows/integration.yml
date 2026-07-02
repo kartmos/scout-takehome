@@ -1,0 +1,65 @@
+name: Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  integration:
+    name: Integration tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Dev-only credentials — safe to commit; never use in production.
+      SCOUT_S3_ACCESS_KEY: scout-dev-access
+      SCOUT_S3_SECRET_KEY: scout-dev-secret-key-change-me
+      SCOUT_API_KEY: scout-dev-api-key-do-not-use-in-production
+      SCOUT_S3_BUCKET: scout-photos
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: backend/go.mod
+          cache-dependency-path: backend/go.sum
+
+      - name: Build Docker images
+        run: docker compose build
+
+      - name: Start services and wait for healthy
+        run: docker compose up -d --wait --wait-timeout 120
+
+      - name: Smoke check – frontend, healthz, metrics
+        run: |
+          curl -fsS http://127.0.0.1:8090/ -o /dev/null
+          curl -fsS http://127.0.0.1:8080/healthz -o /dev/null
+          curl -fsS http://127.0.0.1:8080/metrics -o /dev/null
+
+      - name: Seed – first run
+        run: docker compose --profile seed run --rm seed
+
+      - name: Seed – second run (idempotency check)
+        run: docker compose --profile seed run --rm seed
+
+      - name: Integration tests
+        run: |
+          cd backend
+          SCOUT_API_URL=http://127.0.0.1:8080 \
+          SCOUT_API_KEY=scout-dev-api-key-do-not-use-in-production \
+          SCOUT_DATASET_DIR="$PWD/../dataset/images" \
+          go test -race -tags integration ./integration
+
+      - name: Dump service state on failure
+        if: failure()
+        run: |
+          docker compose ps
+          docker compose logs
+
+      - name: Cleanup
+        if: always()
+        run: docker compose down --volumes
