@@ -264,6 +264,8 @@ rendered_y = bbox_ymin * rendered_height
 ```
 DPR scales the pixel request; CSS coordinates remain the same. The overlay uses CSS coordinates, not device pixels.
 
+**TypeScript modelling**: application-owned structural contracts use `interface` (component props, state, view models, and helper results). A small number of `type` declarations are intentionally retained only as aliases to generated OpenAPI indexed-access types, for example `components['schemas']['Photo']`. TypeScript interfaces cannot directly express that alias operation; replacing it with a duplicated interface would weaken the generated schema as the single source of truth. This is the documented exception to the assignment's `interface`-over-`type` recommendation.
+
 ---
 
 ## Observability
