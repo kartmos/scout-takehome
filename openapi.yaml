@@ -62,6 +62,7 @@ paths:
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
         '500': { $ref: '#/components/responses/InternalError' }
 
   /photos/{photoId}:
@@ -79,6 +80,7 @@ paths:
               schema: { $ref: '#/components/schemas/Photo' }
         '401': { $ref: '#/components/responses/Unauthorized' }
         '404': { $ref: '#/components/responses/NotFound' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
         '500': { $ref: '#/components/responses/InternalError' }
 
   /photos:
@@ -110,6 +112,18 @@ paths:
           in: query
           description: Keep photos that have at least one prediction with confidence at or above this value (inclusive).
           schema: { type: number, minimum: 0, maximum: 1, example: 0.5 }
+        - name: nearX
+          in: query
+          description: Center X coordinate (metres, [0,40]) of the greenhouse map filter circle. Requires nearY and nearRadius.
+          schema: { type: number, minimum: 0, maximum: 40, example: 20 }
+        - name: nearY
+          in: query
+          description: Center Y coordinate (metres, [0,40]) of the greenhouse map filter circle. Requires nearX and nearRadius.
+          schema: { type: number, minimum: 0, maximum: 40, example: 20 }
+        - name: nearRadius
+          in: query
+          description: Radius in metres of the map filter circle (positive). Requires nearX and nearY.
+          schema: { type: number, exclusiveMinimum: 0, example: 5 }
       responses:
         '200':
           description: A page of photos
@@ -118,6 +132,7 @@ paths:
               schema: { $ref: '#/components/schemas/PhotoPage' }
         '400': { $ref: '#/components/responses/BadRequest' }
         '401': { $ref: '#/components/responses/Unauthorized' }
+        '405': { $ref: '#/components/responses/MethodNotAllowed' }
         '500': { $ref: '#/components/responses/InternalError' }
 
 # Thumbnail delivery (serving photos at arbitrary sizes/DPR/quality, on demand) is intentionally
@@ -151,6 +166,10 @@ components:
       description: The requested resource was not found.
       content:
         application/json: { schema: { $ref: '#/components/schemas/NotFoundError' } }
+    MethodNotAllowed:
+      description: The HTTP method is not allowed on this endpoint.
+      content:
+        application/json: { schema: { $ref: '#/components/schemas/MethodNotAllowedError' } }
     InternalError:
       description: An internal server error occurred.
       content:
@@ -274,6 +293,16 @@ components:
       properties:
         code: { type: string, enum: [NotFound] }
         resource_id: { type: string, description: Identifier of the resource that was not found. }
+
+    MethodNotAllowedError:
+      type: object
+      description: The HTTP method is not allowed on this endpoint.
+      allOf:
+        - $ref: '#/components/schemas/ApiError'
+      required: [code, allowed]
+      properties:
+        code: { type: string, enum: [MethodNotAllowed] }
+        allowed: { type: string, description: Comma-separated list of allowed HTTP methods. }
 
     InternalServerError:
       type: object

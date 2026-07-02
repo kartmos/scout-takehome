@@ -40,6 +40,9 @@ var allowedListParams = map[string]bool{
 	"limit":         true,
 	"classId":       true,
 	"minConfidence": true,
+	"nearX":         true,
+	"nearY":         true,
+	"nearRadius":    true,
 }
 
 const (
@@ -47,6 +50,7 @@ const (
 	maxClassIDLen    = 64
 	maxLimitLen      = 20
 	maxConfidenceLen = 64
+	maxCoordLen      = 32
 )
 
 func handleUploadLink(repo photoRepository, storage photoStorage, logger *slog.Logger) http.HandlerFunc {
@@ -280,7 +284,57 @@ func parseListParams(r *http.Request) (sqlite.ListPhotosParams, error) {
 		params.MinConfidence = &f
 	}
 
+	_, hasNearX := q["nearX"]
+	_, hasNearY := q["nearY"]
+	_, hasNearR := q["nearRadius"]
+	if hasNearX || hasNearY || hasNearR {
+		if !hasNearX || !hasNearY || !hasNearR {
+			return sqlite.ListPhotosParams{}, apperror.NewValidation("near filter incomplete", []apperror.FieldViolation{
+				{Field: "nearX/nearY/nearRadius", Issue: "all three parameters must be provided together"},
+			})
+		}
+		nearX, err := parseFiniteFloat("nearX", q["nearX"][0], 0, 40)
+		if err != nil {
+			return sqlite.ListPhotosParams{}, err
+		}
+		nearY, err := parseFiniteFloat("nearY", q["nearY"][0], 0, 40)
+		if err != nil {
+			return sqlite.ListPhotosParams{}, err
+		}
+		nearR, err := parseFiniteFloat("nearRadius", q["nearRadius"][0], 0, 40)
+		if err != nil {
+			return sqlite.ListPhotosParams{}, err
+		}
+		if nearR <= 0 {
+			return sqlite.ListPhotosParams{}, apperror.NewValidation("invalid nearRadius", []apperror.FieldViolation{
+				{Field: "nearRadius", Issue: "must be positive"},
+			})
+		}
+		params.Near = &sqlite.NearLocation{X: nearX, Y: nearY, Radius: nearR}
+	}
+
 	return params, nil
+}
+
+// parseFiniteFloat parses a non-empty, bounded query param value. Returns a validation error on any issue.
+func parseFiniteFloat(field, v string, minVal, maxVal float64) (float64, error) {
+	if v == "" {
+		return 0, apperror.NewValidation("invalid "+field, []apperror.FieldViolation{
+			{Field: field, Issue: "must not be empty"},
+		})
+	}
+	if len(v) > maxCoordLen {
+		return 0, apperror.NewValidation("invalid "+field, []apperror.FieldViolation{
+			{Field: field, Issue: "value too long"},
+		})
+	}
+	f, parseErr := strconv.ParseFloat(v, 64)
+	if parseErr != nil || math.IsNaN(f) || math.IsInf(f, 0) || f < minVal || f > maxVal {
+		return 0, apperror.NewValidation("invalid "+field, []apperror.FieldViolation{
+			{Field: field, Issue: "must be a finite decimal between 0 and 40"},
+		})
+	}
+	return f, nil
 }
 
 // isJSONContentType reports whether ct is application/json (with optional media-type parameters).

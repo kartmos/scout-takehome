@@ -6,14 +6,18 @@ afterEach(() => {
   cleanup();
 });
 
-// jsdom doesn't implement ResizeObserver
+// jsdom doesn't implement ResizeObserver — use Object.defineProperty so the stub persists
+// across all test files in the worker (vi.stubGlobal auto-restores between files).
 if (typeof ResizeObserver === 'undefined') {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  (globalThis as any).ResizeObserver = class ResizeObserver {
-    observe() {}
-    unobserve() {}
-    disconnect() {}
-  };
+  Object.defineProperty(globalThis, 'ResizeObserver', {
+    value: class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    },
+    writable: true,
+    configurable: true,
+  });
 }
 
 // jsdom doesn't implement HTMLDialogElement methods

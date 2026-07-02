@@ -58,8 +58,10 @@ func accessLogMiddleware(logger *slog.Logger, m *observability.Metrics) func(htt
 			next.ServeHTTP(rw, r)
 
 			dur := time.Since(start)
+			// "/" is the catch-all 404 handler — treat it the same as an
+			// unregistered path to avoid high-cardinality route labels.
 			route := r.Pattern
-			if route == "" {
+			if route == "" || route == "/" {
 				route = "unmatched"
 			}
 

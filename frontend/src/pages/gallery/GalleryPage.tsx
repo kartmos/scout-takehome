@@ -1,10 +1,10 @@
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { useAppDispatch, useAppSelector } from '../../app/hooks';
 import { resetFilters } from '../../features/filters/filtersSlice';
 import { FilterControls } from '../../features/filters/FilterControls';
 import { PhotoViewer } from '../../features/viewer/PhotoViewer';
 import { GreenhouseMap, type MapLocation } from '../../features/map/GreenhouseMap';
-import { isNear } from '../../features/map/mapGeometry';
+import { NEAR_RADIUS_METRES } from '../../features/map/mapGeometry';
 import { useListPhotosQuery } from '../../shared/api/scoutApi';
 import { PhotoCard } from '../../entities/photo/PhotoCard';
 import type { ApiError } from '../../shared/lib/apiError';
@@ -125,11 +125,50 @@ export function GalleryPage() {
     refetch: mapRefetch,
   } = useListPhotosQuery(mapQueryArgs, { skip: !mapEnabled });
 
-  // Photos within 3 m of the selected location (intersects class/confidence via mapData)
-  const nearPhotos = useMemo<Photo[]>(() => {
-    if (selectedLocation === null || !mapData) return [];
-    return mapData.items.filter((p) => isNear(p.x, p.y, selectedLocation.x, selectedLocation.y));
-  }, [selectedLocation, mapData]);
+  // Server-side cursor-paginated near query — activated when a location is selected.
+  const [nearPageIndex, setNearPageIndex] = useState(0);
+  const [nearCursorHistory, setNearCursorHistory] = useState<(string | undefined)[]>([undefined]);
+  const nearCursor = nearCursorHistory[nearPageIndex];
+  const nearQueryArgs = selectedLocation !== null ? {
+    limit: PAGE_SIZE,
+    nearX: selectedLocation.x,
+    nearY: selectedLocation.y,
+    nearRadius: NEAR_RADIUS_METRES,
+    ...(classId !== null ? { classId } : {}),
+    ...(minConfidence !== null ? { minConfidence } : {}),
+    ...(nearCursor !== undefined ? { cursor: nearCursor } : {}),
+  } : undefined;
+
+  const {
+    currentData: nearData,
+    isFetching: nearFetching,
+    isError: nearError,
+    refetch: nearRefetch,
+  } = useListPhotosQuery(nearQueryArgs ?? { limit: 0 }, { skip: selectedLocation === null });
+
+  const nearPhotos: Photo[] = nearData?.items ?? [];
+
+  const handleSelectLocation = (loc: MapLocation | null) => {
+    setSelectedLocation(loc);
+    setNearPageIndex(0);
+    setNearCursorHistory([undefined]);
+  };
+
+  const handleNearNext = () => {
+    if (!nearData?.next_token || nearFetching) return;
+    const token = nearData.next_token;
+    setNearCursorHistory((prev) => {
+      const next = [...prev];
+      if (next.length <= nearPageIndex + 1) next.push(token);
+      return next;
+    });
+    setNearPageIndex(nearPageIndex + 1);
+  };
+
+  const handleNearPrev = () => {
+    if (nearPageIndex === 0 || nearFetching) return;
+    setNearPageIndex(nearPageIndex - 1);
+  };
 
   // ── Viewer state ──────────────────────────────────────────────────────────
   const [selectedPhotoId, setSelectedPhotoId] = useState<string | null>(null);
@@ -195,47 +234,76 @@ export function GalleryPage() {
               <span className={styles.locationLabel}>
                 Near x&nbsp;{selectedLocation.x.toFixed(1)}&nbsp;m,
                 y&nbsp;{selectedLocation.y.toFixed(1)}&nbsp;m
-                &nbsp;·&nbsp;{nearPhotos.length}&nbsp;photo{nearPhotos.length !== 1 ? 's' : ''}
+                {nearData && (
+                  <>&nbsp;·&nbsp;{nearPhotos.length}&nbsp;photo{nearPhotos.length !== 1 ? 's' : ''}
+                  {nearData.next_token ? ' on this page' : ''}</>
+                )}
               </span>
               <button
                 type="button"
                 className={styles.clearLocationBtn}
-                onClick={() => { setSelectedLocation(null); setMapHighlightedPhotoId(null); }}
+                onClick={() => { handleSelectLocation(null); setMapHighlightedPhotoId(null); }}
               >
                 × Clear location
               </button>
             </div>
 
-            {mapFetching && !mapData && <SkeletonGrid />}
+            {nearFetching && !nearData && <SkeletonGrid />}
 
-            {!mapFetching && nearPhotos.length > 0 && (
-              <div
-                className={styles.grid}
-                aria-label={`Photos near x ${selectedLocation.x.toFixed(1)} m, y ${selectedLocation.y.toFixed(1)} m`}
-              >
-                {nearPhotos.map((photo) => (
-                  <PhotoCard
-                    key={photo.id}
-                    photo={photo}
-                    matchingClassId={classId}
-                    minConfidence={minConfidence}
-                    onSelect={handleSelect}
-                    highlighted={photo.id === mapHighlightedPhotoId}
-                  />
-                ))}
-              </div>
+            {nearError && <ErrorPanel error={undefined} onRetry={nearRefetch} />}
+
+            {!nearFetching && !nearError && nearPhotos.length > 0 && (
+              <>
+                <div
+                  className={styles.grid}
+                  aria-label={`Photos near x ${selectedLocation.x.toFixed(1)} m, y ${selectedLocation.y.toFixed(1)} m`}
+                >
+                  {nearPhotos.map((photo) => (
+                    <PhotoCard
+                      key={photo.id}
+                      photo={photo}
+                      matchingClassId={classId}
+                      minConfidence={minConfidence}
+                      onSelect={handleSelect}
+                      highlighted={photo.id === mapHighlightedPhotoId}
+                    />
+                  ))}
+                </div>
+                <nav className={styles.pagination} aria-label="Near location pagination">
+                  <button
+                    type="button"
+                    onClick={handleNearPrev}
+                    disabled={nearPageIndex === 0 || nearFetching}
+                    className={styles.pageBtn}
+                  >
+                    Previous
+                  </button>
+                  <span className={styles.pageInfo} aria-live="polite" aria-atomic="true">
+                    Page {nearPageIndex + 1}
+                    {!nearData?.next_token ? ' (last)' : ''}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={handleNearNext}
+                    disabled={!nearData?.next_token || nearFetching}
+                    className={styles.pageBtn}
+                  >
+                    Next
+                  </button>
+                </nav>
+              </>
             )}
 
-            {!mapFetching && nearPhotos.length === 0 && (
+            {!nearFetching && !nearError && nearPhotos.length === 0 && (
               <div className={styles.emptyPanel}>
                 <p className={styles.emptyMsg}>
-                  No photos within 3 m of this location
+                  No photos within {NEAR_RADIUS_METRES} m of this location
                   {hasActiveFilters ? ' match current filters.' : '.'}
                 </p>
                 <button
                   type="button"
                   className={styles.retryBtn}
-                  onClick={() => { setSelectedLocation(null); setMapHighlightedPhotoId(null); }}
+                  onClick={() => { handleSelectLocation(null); setMapHighlightedPhotoId(null); }}
                 >
                   Clear location
                 </button>
@@ -324,7 +392,7 @@ export function GalleryPage() {
         mode={drawerMode}
         onModeChange={handleModeChange}
         selectedLocation={selectedLocation}
-        onSelectLocation={setSelectedLocation}
+        onSelectLocation={handleSelectLocation}
         highlightedPhotoId={mapHighlightedPhotoId}
         onHighlightPhoto={setMapHighlightedPhotoId}
         classId={classId}

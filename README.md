@@ -12,11 +12,68 @@ This repo is the full implementation: a Go data API with an on-demand thumbnail 
 
 ---
 
+## Supported platforms
+
+### CI platform matrix
+
+The workflows target the following native runners. Treat ARM64 support as
+verified after the corresponding GitHub Actions job completes successfully.
+
+| Platform | Container target | CI runner |
+|---|---|---|
+| Linux x86-64 | `linux/amd64` | `ubuntu-latest` |
+| Linux ARM64 | `linux/arm64` | `ubuntu-24.04-arm` |
+
+### Supported via Docker Desktop
+
+| Host | Container target | Notes |
+|---|---|---|
+| Intel Mac | `linux/amd64` | Docker Desktop selects the platform automatically |
+| Apple Silicon Mac | `linux/arm64` | Docker Desktop selects the platform automatically |
+
+All containers are Linux containers. No native Darwin binaries are built or shipped.
+
+Requires a current Docker Desktop with Compose v2 and at least the resource budget documented below (≥ 1 vCPU, ≥ 768 MB RAM available to Docker).
+
+### Quick diagnostic
+
+```bash
+uname -m
+docker version
+docker compose version
+docker info --format '{{.Architecture}}'
+docker image inspect scout-api:local --format '{{.Architecture}}'
+docker image inspect scout-web:local --format '{{.Architecture}}'
+```
+
+Docker selects the native platform automatically — you should not need `DOCKER_DEFAULT_PLATFORM=linux/amd64` on Apple Silicon.
+
+### Production images
+
+`compose.production.yaml` requires externally supplied API/web images whose manifest includes the host's target platform. This repository does not currently publish those images; you must build and push them yourself (for example with `docker buildx build --platform linux/amd64,linux/arm64 --push`).
+
+### Unsupported / unverified architectures
+
+`linux/arm/v7`, `linux/386`, `linux/s390x`, `linux/riscv64`, Windows containers, and native Darwin binaries are outside this project's support contract. Do not use `platform: linux/amd64` overrides to emulate unsupported targets.
+
+---
+
 ## Prerequisites
 
-- Docker Desktop (WSL integration enabled on Windows)
-- Go 1.26+ (native backend dev)
-- Node.js 24 + pnpm 10.34.4 (native frontend dev)
+### Docker (required to run the stack)
+
+| Host | Required | Notes |
+|---|---|---|
+| **Linux** | Docker Engine 25+ with Compose v2 plugin | `apt install docker-ce docker-compose-plugin` (or distro equivalent) |
+| **Intel or Apple Silicon Mac** | Docker Desktop (current) | Includes Compose v2; selects the native platform automatically |
+| **Windows** | Docker Desktop with WSL2 integration enabled | Use Linux containers |
+
+All containers are Linux containers. The `docker compose up -d --build --wait` command is architecture-neutral; no `DOCKER_DEFAULT_PLATFORM` override is needed on Apple Silicon.
+
+### Native development (optional)
+
+- Go 1.26+ (backend only)
+- Node.js 24 + pnpm 10.34.4 (frontend only)
 - `dataset/` committed (50 JPEGs + `predictions.db` are tracked in git; no extra steps needed)
 
 ---

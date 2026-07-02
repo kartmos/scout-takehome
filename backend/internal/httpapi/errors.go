@@ -35,6 +35,13 @@ type notFoundErrorBody struct {
 	ResourceID string `json:"resource_id"`
 }
 
+type methodNotAllowedErrorBody struct {
+	RequestID string `json:"request_id"`
+	Message   string `json:"message"`
+	Code      string `json:"code"`
+	Allowed   string `json:"allowed"`
+}
+
 // WriteError maps err to an OpenAPI-compatible JSON response. It sets
 // Content-Type and Cache-Control, marshals the body, then writes the status.
 // Internal and unknown errors are logged once with the retained cause.
@@ -86,6 +93,15 @@ func WriteError(w http.ResponseWriter, r *http.Request, logger *slog.Logger, err
 			Message:    appErr.Error(),
 			Code:       "NotFound",
 			ResourceID: appErr.ResourceID(),
+		})
+
+	case apperror.KindMethodNotAllowed:
+		w.Header().Set("Allow", appErr.Allowed())
+		writeErrorJSON(w, http.StatusMethodNotAllowed, methodNotAllowedErrorBody{
+			RequestID: reqID,
+			Message:   appErr.Error(),
+			Code:      "MethodNotAllowed",
+			Allowed:   appErr.Allowed(),
 		})
 
 	default:

@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build context: repository root (docker build -f backend/Dockerfile .)
 
-FROM golang:1.26-bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:1.26-bookworm AS builder
 
 WORKDIR /build
 
@@ -11,8 +11,8 @@ RUN go mod download
 
 COPY backend/ ./
 
-ARG TARGETOS=linux
-ARG TARGETARCH=amd64
+ARG TARGETOS
+ARG TARGETARCH
 
 RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
     go build -trimpath -ldflags="-s -w" -o /out/scout-api ./cmd/api && \

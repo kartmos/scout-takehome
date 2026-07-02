@@ -75,10 +75,10 @@ func (s *Service) Get(ctx context.Context, photo domain.Photo, req Request) (*Th
 		}
 		return genErr
 	})
-	if err != nil {
-		return nil, err
-	}
 
+	// Count hit/miss based on the initial lookup result, regardless of generation outcome.
+	// A miss is counted whenever the initial lookup finds no committed entry; failed cold
+	// generation still increments misses so the metric stays truthful.
 	if hit {
 		if s.hooks.OnCacheHit != nil {
 			s.hooks.OnCacheHit()
@@ -87,6 +87,10 @@ func (s *Service) Get(ctx context.Context, photo domain.Photo, req Request) (*Th
 		if s.hooks.OnCacheMiss != nil {
 			s.hooks.OnCacheMiss()
 		}
+	}
+
+	if err != nil {
+		return nil, err
 	}
 
 	return &ThumbnailResult{

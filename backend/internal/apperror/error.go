@@ -8,6 +8,7 @@ const (
 	KindAuth
 	KindNotFound
 	KindInternal
+	KindMethodNotAllowed
 )
 
 // FieldViolation describes a single field-level validation issue.
@@ -24,6 +25,7 @@ type AppError struct {
 	violations []FieldViolation
 	resourceID string
 	cause      error
+	allowed    string // comma-separated Allow header value for 405 errors
 }
 
 func (e *AppError) Error() string { return e.message }
@@ -38,6 +40,7 @@ func (e *AppError) Unwrap() error {
 
 func (e *AppError) Kind() Kind         { return e.kind }
 func (e *AppError) ResourceID() string { return e.resourceID }
+func (e *AppError) Allowed() string    { return e.allowed }
 
 // Violations returns a copy of the field violations (non-nil only for validation errors).
 func (e *AppError) Violations() []FieldViolation {
@@ -50,11 +53,12 @@ func (e *AppError) Violations() []FieldViolation {
 }
 
 const (
-	fallbackValidationMsg = "request validation failed"
-	fallbackAuthMsg       = "authentication required"
-	fallbackNotFoundMsg   = "resource not found"
-	fallbackResourceID    = "unknown"
-	internalMsg           = "an internal error occurred"
+	fallbackValidationMsg      = "request validation failed"
+	fallbackAuthMsg            = "authentication required"
+	fallbackNotFoundMsg        = "resource not found"
+	fallbackResourceID         = "unknown"
+	internalMsg                = "an internal error occurred"
+	fallbackMethodNotAllowedMsg = "method not allowed"
 )
 
 // NewValidation constructs a validation error.
@@ -96,4 +100,10 @@ func NewNotFound(msg string, resourceID string) *AppError {
 // Error() always returns a stable generic public message, never the cause text.
 func NewInternal(cause error) *AppError {
 	return &AppError{kind: KindInternal, message: internalMsg, cause: cause}
+}
+
+// NewMethodNotAllowed constructs a 405 error. allowed is the comma-separated list of
+// HTTP methods permitted for the resource (used as the Allow header value).
+func NewMethodNotAllowed(allowed string) *AppError {
+	return &AppError{kind: KindMethodNotAllowed, message: fallbackMethodNotAllowedMsg, allowed: allowed}
 }

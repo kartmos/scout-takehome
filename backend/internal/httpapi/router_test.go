@@ -3,10 +3,15 @@ package httpapi_test
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"scout/internal/httpapi"
 )
+
+func jsonContains(body, fragment string) bool {
+	return strings.Contains(body, fragment)
+}
 
 func productionRouter(t *testing.T) http.Handler {
 	t.Helper()
@@ -51,8 +56,17 @@ func TestHealthz_MethodNotAllowed(t *testing.T) {
 	if got, want := w.Code, http.StatusMethodNotAllowed; got != want {
 		t.Errorf("status = %d, want %d", got, want)
 	}
+	if got, want := w.Header().Get("Content-Type"), "application/json"; got != want {
+		t.Errorf("Content-Type = %q, want %q", got, want)
+	}
 	if allow := w.Header().Get("Allow"); allow == "" {
 		t.Error("Allow header missing on 405 response")
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"code":"MethodNotAllowed"`, `"request_id"`, `"allowed"`} {
+		if !jsonContains(body, want) {
+			t.Errorf("body missing %q: %s", want, body)
+		}
 	}
 }
 
@@ -65,6 +79,15 @@ func TestHealthz_NotFound(t *testing.T) {
 
 	if got, want := w.Code, http.StatusNotFound; got != want {
 		t.Errorf("status = %d, want %d", got, want)
+	}
+	if got, want := w.Header().Get("Content-Type"), "application/json"; got != want {
+		t.Errorf("Content-Type = %q, want %q", got, want)
+	}
+	body := w.Body.String()
+	for _, want := range []string{`"code":"NotFound"`, `"request_id"`, `"resource_id"`} {
+		if !jsonContains(body, want) {
+			t.Errorf("body missing %q: %s", want, body)
+		}
 	}
 }
 

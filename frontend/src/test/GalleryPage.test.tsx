@@ -87,13 +87,29 @@ const mapResult: {
   refetch: vi.fn(),
 };
 
+// Server-side near filter query result (limit=PAGE_SIZE with nearX/nearY/nearRadius)
+const nearResult: {
+  currentData: unknown;
+  isFetching: boolean;
+  isError: boolean;
+  error: unknown;
+  refetch: () => void;
+} = {
+  currentData: undefined,
+  isFetching: false,
+  isError: false,
+  error: undefined,
+  refetch: vi.fn(),
+};
+
 const queryCallLog: Array<[unknown, unknown]> = [];
 
 vi.mock('../shared/api/scoutApi', () => ({
   useListPhotosQuery: (args: unknown, opts?: unknown) => {
     queryCallLog.push([args, opts]);
-    const a = args as { limit?: number };
+    const a = args as { limit?: number; nearX?: number };
     if (a.limit === 200) return mapResult;
+    if (a.nearX !== undefined) return nearResult;
     return galleryResult;
   },
   useGetPhotoQuery: () => ({ currentData: undefined, isError: false, refetch: vi.fn() }),
@@ -161,6 +177,12 @@ beforeEach(() => {
   mapResult.isError = false;
   mapResult.error = undefined;
   mapResult.refetch = vi.fn();
+
+  nearResult.currentData = undefined;
+  nearResult.isFetching = false;
+  nearResult.isError = false;
+  nearResult.error = undefined;
+  nearResult.refetch = vi.fn();
 
   queryCallLog.length = 0;
 
@@ -307,9 +329,9 @@ describe('GalleryPage — map integration', () => {
   });
 
   it('selecting a location shows only photos within 3m and hides normal pagination', () => {
-    // PHOTO_A is at (1, 2) — within 3m of selected (1, 2)
-    // PHOTO_B is at (30, 35) — far from (1, 2)
+    // Server returns only PHOTO_A for the near query (PHOTO_B is too far)
     mapResult.currentData = { items: [PHOTO_A, PHOTO_B], next_token: undefined };
+    nearResult.currentData = { items: [PHOTO_A], next_token: undefined };
     renderGallery();
     fireEvent.click(screen.getByRole('button', { name: /Show greenhouse map/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Test: select location (1, 2)' }));
@@ -320,18 +342,20 @@ describe('GalleryPage — map integration', () => {
     expect(screen.getByRole('button', { name: /Clear location/i })).toBeInTheDocument();
     // Normal pagination hidden
     expect(screen.queryByRole('navigation', { name: 'Gallery pagination' })).toBeNull();
-    // Only PHOTO_A (near) should appear, not PHOTO_B (far)
-    // PHOTO_A is within 3m; PHOTO_B is 40+ metres away
+    // Only PHOTO_A (near) should appear — server already filtered out PHOTO_B
     const articles = screen.getAllByRole('article');
     expect(articles).toHaveLength(1);
   });
 
   it('Clear location button restores normal gallery and pagination', () => {
     mapResult.currentData = { items: [PHOTO_A], next_token: undefined };
+    nearResult.currentData = { items: [PHOTO_A], next_token: undefined };
+    galleryResult.currentData = { items: [PHOTO_A, PHOTO_B], next_token: 'tok' };
+    galleryResult.isFetching = false;
     renderGallery();
     fireEvent.click(screen.getByRole('button', { name: /Show greenhouse map/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Test: select location (1, 2)' }));
-    fireEvent.click(screen.getByRole('button', { name: /Clear location/i }));
+    fireEvent.click(screen.getByRole('button', { name: /× Clear location/i }));
 
     expect(screen.getByLabelText('Photo gallery')).toBeInTheDocument();
     expect(screen.getByRole('navigation', { name: 'Gallery pagination' })).toBeInTheDocument();
@@ -351,12 +375,13 @@ describe('GalleryPage — map integration', () => {
 
   it('Clear location does NOT clear class/confidence filters', () => {
     mapResult.currentData = { items: [PHOTO_A], next_token: undefined };
+    nearResult.currentData = { items: [PHOTO_A], next_token: undefined };
     const store = makeStore();
     store.dispatch({ type: 'filters/setClassId', payload: 'mirid' });
     renderGallery(store);
     fireEvent.click(screen.getByRole('button', { name: /Show greenhouse map/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Test: select location (1, 2)' }));
-    fireEvent.click(screen.getByRole('button', { name: /Clear location/i }));
+    fireEvent.click(screen.getByRole('button', { name: /× Clear location/i }));
     expect(store.getState().filters.classId).toBe('mirid');
   });
 
@@ -381,36 +406,37 @@ describe('GalleryPage — map integration', () => {
   });
 
   it('location-filtered grid shows only near photos (intersection with class filter)', () => {
-    // Both photos in map data, classId=mirid
-    // PHOTO_A has mirid prediction at 0.87, PHOTO_B has none
+    // Server applies both near + class filters; returns only PHOTO_A (near + has mirid)
     mapResult.currentData = { items: [PHOTO_A, PHOTO_B], next_token: undefined };
+    nearResult.currentData = { items: [PHOTO_A], next_token: undefined };
     const store = makeStore();
     store.dispatch({ type: 'filters/setClassId', payload: 'mirid' });
     renderGallery(store);
     fireEvent.click(screen.getByRole('button', { name: /Show greenhouse map/i }));
     fireEvent.click(screen.getByRole('button', { name: 'Test: select location (1, 2)' }));
 
-    // PHOTO_A is within 3m AND has mirid → shown
-    // PHOTO_B is far → NOT shown
+    // Server already filtered: PHOTO_A (near + mirid) shown, PHOTO_B excluded
     const articles = screen.getAllByRole('article');
     expect(articles).toHaveLength(1);
   });
 
   it('clicking a specific marker highlights that card (data-highlighted attribute)', () => {
-    // PHOTO_A is at (1, 2) — within 3m; PHOTO_B is far
+    // Server returns only PHOTO_A for the near query
     mapResult.currentData = { items: [PHOTO_A, PHOTO_B], next_token: undefined };
+    nearResult.currentData = { items: [PHOTO_A], next_token: undefined };
     renderGallery();
     fireEvent.click(screen.getByRole('button', { name: /Show greenhouse map/i }));
     fireEvent.click(screen.getByRole('button', { name: /Test: select location with marker/i }));
 
     const articles = screen.getAllByRole('article');
-    // Only PHOTO_A is near → 1 card; it should be highlighted
+    // Only PHOTO_A returned by near query; it should be highlighted
     expect(articles).toHaveLength(1);
     expect(articles[0]).toHaveAttribute('data-highlighted', 'true');
   });
 
   it('background canvas click (no marker) shows near cards without highlight', () => {
     mapResult.currentData = { items: [PHOTO_A, PHOTO_B], next_token: undefined };
+    nearResult.currentData = { items: [PHOTO_A], next_token: undefined };
     renderGallery();
     fireEvent.click(screen.getByRole('button', { name: /Show greenhouse map/i }));
     // "Test: select location (1, 2)" fires only onSelectLocation, not onHighlightPhoto
@@ -423,10 +449,13 @@ describe('GalleryPage — map integration', () => {
 
   it('clearing location removes card highlight', () => {
     mapResult.currentData = { items: [PHOTO_A], next_token: undefined };
+    nearResult.currentData = { items: [PHOTO_A], next_token: undefined };
+    galleryResult.currentData = { items: [PHOTO_A], next_token: undefined };
+    galleryResult.isFetching = false;
     renderGallery();
     fireEvent.click(screen.getByRole('button', { name: /Show greenhouse map/i }));
     fireEvent.click(screen.getByRole('button', { name: /Test: select location with marker/i }));
-    fireEvent.click(screen.getByRole('button', { name: /Clear location/i }));
+    fireEvent.click(screen.getByRole('button', { name: /× Clear location/i }));
 
     // Back to normal gallery — articles exist but none are highlighted
     const articles = screen.getAllByRole('article');

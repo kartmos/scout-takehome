@@ -56,6 +56,17 @@ const MARKER_OUTER_RADIUS = 10;
 const MARKER_INNER_RADIUS = 5;
 const NEAR_CIRCLE_STROKE = 1.5;
 
+// Background image
+const BG_OPACITY = 0.6;
+
+// Axis label and legend positioning offsets (in world-space pixels, scaled by invScale)
+const AXIS_LABEL_X_OFFSET     = 6;  // half-width of label text, centres it on the tick
+const AXIS_LABEL_Y_OFFSET     = 3;  // gap below the bottom plot edge
+const AXIS_LABEL_LEFT_OFFSET  = 22; // distance left of the plot left edge
+const AXIS_LABEL_TOP_OFFSET   = 4;  // half-height of label text, centres it on the tick
+const LEGEND_X_HALF_WIDTH     = 15; // half-width of "metres" text
+const LEGEND_Y_OFFSET         = 14; // gap below the axis labels
+
 // Grid
 const GRID_STROKE_EDGE  = 'rgba(200,200,200,0.3)';
 const GRID_STROKE_INNER = 'rgba(200,200,200,0.12)';
@@ -343,7 +354,7 @@ function KonvaMapCanvas({
                   y={plotTop}
                   width={plotSizePx}
                   height={plotSizePx}
-                  opacity={0.6}
+                  opacity={BG_OPACITY}
                   listening={false}
                 />
               )}
@@ -382,16 +393,16 @@ function KonvaMapCanvas({
                 return (
                   <Group key={`label${m}`}>
                     <Text
-                      x={sx - 6 * invScale}
-                      y={plotTop + plotSizePx + 3 * invScale}
+                      x={sx - AXIS_LABEL_X_OFFSET * invScale}
+                      y={plotTop + plotSizePx + AXIS_LABEL_Y_OFFSET * invScale}
                       text={String(m)}
                       fontSize={fs}
                       fill={AXIS_LABEL_FILL}
                       listening={false}
                     />
                     <Text
-                      x={plotLeft - 22 * invScale}
-                      y={hy - 4 * invScale}
+                      x={plotLeft - AXIS_LABEL_LEFT_OFFSET * invScale}
+                      y={hy - AXIS_LABEL_TOP_OFFSET * invScale}
                       text={String(m)}
                       fontSize={fs}
                       fill={AXIS_LABEL_FILL}
@@ -403,8 +414,8 @@ function KonvaMapCanvas({
 
               {/* Metres legend */}
               <Text
-                x={plotLeft + plotSizePx / 2 - 15 * invScale}
-                y={plotTop + plotSizePx + 14 * invScale}
+                x={plotLeft + plotSizePx / 2 - LEGEND_X_HALF_WIDTH * invScale}
+                y={plotTop + plotSizePx + LEGEND_Y_OFFSET * invScale}
                 text="metres"
                 fontSize={LEGEND_FONT_SIZE * invScale}
                 fill={LEGEND_FILL}

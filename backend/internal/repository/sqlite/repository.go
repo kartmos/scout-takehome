@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"net/url"
 	"path/filepath"
 	"strings"
@@ -30,12 +31,21 @@ const (
 	MaxLimit = 200
 )
 
+// NearLocation is the optional location proximity filter for ListPhotos.
+// All three fields are required together; a partial tuple is rejected.
+type NearLocation struct {
+	X      float64 // greenhouse X coordinate in metres [0, 40]
+	Y      float64 // greenhouse Y coordinate in metres [0, 40]
+	Radius float64 // search radius in metres (positive, inclusive)
+}
+
 // ListPhotosParams carries all optional inputs for ListPhotos.
 type ListPhotosParams struct {
 	Cursor        string
 	Limit         int
 	ClassID       *domain.ClassID
 	MinConfidence *float64
+	Near          *NearLocation
 }
 
 // Repository is a read-only SQLite-backed photo repository.
@@ -43,12 +53,9 @@ type Repository struct {
 	db *sql.DB
 }
 
-// photoRow carries a domain photo together with the exact captured_at string
-// scanned from SQLite. The raw string is kept so that NextToken cursors use the
-// original text for SQL boundary comparisons without UTC normalisation.
+// photoRow carries a domain photo for a paginated result.
 type photoRow struct {
-	photo         domain.Photo
-	capturedAtRaw string
+	photo domain.Photo
 }
 
 // Open resolves the path to an absolute path, constructs a safe read-only
@@ -157,20 +164,37 @@ func (r *Repository) ListPhotos(ctx context.Context, params ListPhotosParams) (d
 		}
 	}
 
+	if params.Near != nil {
+		if math.IsNaN(params.Near.X) || math.IsInf(params.Near.X, 0) || params.Near.X < 0 || params.Near.X > 40 {
+			return domain.PhotoPage{}, apperror.NewValidation("invalid nearX", []apperror.FieldViolation{
+				{Field: "nearX", Issue: "must be a finite number in [0, 40]"},
+			})
+		}
+		if math.IsNaN(params.Near.Y) || math.IsInf(params.Near.Y, 0) || params.Near.Y < 0 || params.Near.Y > 40 {
+			return domain.PhotoPage{}, apperror.NewValidation("invalid nearY", []apperror.FieldViolation{
+				{Field: "nearY", Issue: "must be a finite number in [0, 40]"},
+			})
+		}
+		if math.IsNaN(params.Near.Radius) || math.IsInf(params.Near.Radius, 0) || params.Near.Radius <= 0 {
+			return domain.PhotoPage{}, apperror.NewValidation("invalid nearRadius", []apperror.FieldViolation{
+				{Field: "nearRadius", Issue: "must be a positive finite number"},
+			})
+		}
+	}
+
 	var (
-		hasCursor   bool
-		cursorAtRaw string
-		cursorID    string
+		hasCursor bool
+		cursorID  string
 	)
 	if params.Cursor != "" {
 		hasCursor = true
-		cursorAtRaw, cursorID, err = decodeCursor(params.Cursor)
+		cursorID, err = decodeCursor(params.Cursor)
 		if err != nil {
 			return domain.PhotoPage{}, err
 		}
 	}
 
-	rows, hasMore, err := r.queryPhotos(ctx, hasCursor, cursorAtRaw, cursorID, params.ClassID, params.MinConfidence, limit)
+	rows, hasMore, err := r.queryPhotos(ctx, hasCursor, cursorID, params.ClassID, params.MinConfidence, params.Near, limit)
 	if err != nil {
 		return domain.PhotoPage{}, err
 	}
@@ -202,29 +226,29 @@ func (r *Repository) ListPhotos(ctx context.Context, params ListPhotosParams) (d
 	page := domain.PhotoPage{Items: photos}
 	if hasMore {
 		last := rows[len(rows)-1]
-		page.NextToken = encodeCursor(last.capturedAtRaw, last.photo.ID)
+		page.NextToken = encodeCursor(last.photo.ID)
 	}
 	return page, nil
 }
 
 // queryPhotos fetches up to limit photo rows (plus one sentinel for hasMore detection).
-// cursorAtRaw is the exact captured_at string from SQLite used as the keyset boundary;
-// it is compared directly against the column to avoid UTC-normalisation skew.
+// Rows are ordered by primary key (id DESC), which uses the index and avoids a temp B-tree sort.
+// The cursor carries the last returned id for an efficient range seek.
 func (r *Repository) queryPhotos(
 	ctx context.Context,
 	hasCursor bool,
-	cursorAtRaw string,
 	cursorID string,
 	classID *domain.ClassID,
 	minConf *float64,
+	near *NearLocation,
 	limit int,
 ) ([]photoRow, bool, error) {
 	var args []any
 	var clauses []string
 
 	if hasCursor {
-		clauses = append(clauses, "(p.captured_at < ? OR (p.captured_at = ? AND p.id < ?))")
-		args = append(args, cursorAtRaw, cursorAtRaw, cursorID)
+		clauses = append(clauses, "p.id < ?")
+		args = append(args, cursorID)
 	}
 
 	if classID != nil || minConf != nil {
@@ -242,13 +266,20 @@ func (r *Repository) queryPhotos(
 		clauses = append(clauses, sub.String())
 	}
 
+	if near != nil {
+		// Euclidean distance in metres: (x-nearX)^2 + (y-nearY)^2 <= radius^2
+		clauses = append(clauses, "((p.x-?)*(p.x-?)+(p.y-?)*(p.y-?)) <= ?*?")
+		r2 := near.Radius
+		args = append(args, near.X, near.X, near.Y, near.Y, r2, r2)
+	}
+
 	var q strings.Builder
 	q.WriteString("SELECT p.id, p.x, p.y, p.h, p.width, p.height, p.captured_at FROM photos p")
 	if len(clauses) > 0 {
 		q.WriteString(" WHERE ")
 		q.WriteString(strings.Join(clauses, " AND "))
 	}
-	q.WriteString(" ORDER BY p.captured_at DESC, p.id DESC LIMIT ?")
+	q.WriteString(" ORDER BY p.id DESC LIMIT ?")
 	args = append(args, limit+1)
 
 	sqlRows, err := r.db.QueryContext(ctx, q.String(), args...)
@@ -353,25 +384,24 @@ type photoScanner interface {
 	Scan(dest ...any) error
 }
 
-// scanPhotoScanner scans a photo row and returns the domain.Photo together with
-// the exact captured_at string as stored in SQLite (not UTC-normalised).
-func scanPhotoScanner(s photoScanner) (domain.Photo, string, error) {
+// scanPhotoScanner scans a photo row and returns the domain.Photo.
+func scanPhotoScanner(s photoScanner) (domain.Photo, error) {
 	var id, capturedAtStr string
 	var x, y, h float64
 	var width, height int
 
 	if err := s.Scan(&id, &x, &y, &h, &width, &height, &capturedAtStr); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return domain.Photo{}, "", sql.ErrNoRows
+			return domain.Photo{}, sql.ErrNoRows
 		}
-		return domain.Photo{}, "", apperror.NewInternal(fmt.Errorf("sqlite: scan photo: %w", err))
+		return domain.Photo{}, apperror.NewInternal(fmt.Errorf("sqlite: scan photo: %w", err))
 	}
 
 	t, err := time.Parse(time.RFC3339Nano, capturedAtStr)
 	if err != nil {
 		t, err = time.Parse(time.RFC3339, capturedAtStr)
 		if err != nil {
-			return domain.Photo{}, "", apperror.NewInternal(fmt.Errorf("sqlite: malformed captured_at %q: %w", capturedAtStr, err))
+			return domain.Photo{}, apperror.NewInternal(fmt.Errorf("sqlite: malformed captured_at %q: %w", capturedAtStr, err))
 		}
 	}
 
@@ -386,21 +416,20 @@ func scanPhotoScanner(s photoScanner) (domain.Photo, string, error) {
 	}
 
 	if fieldErrs := domain.ValidatePhoto(ph); len(fieldErrs) > 0 {
-		return domain.Photo{}, "", apperror.NewInternal(fmt.Errorf("sqlite: malformed photo row %s: %s", id, fieldErrs[0].Error()))
+		return domain.Photo{}, apperror.NewInternal(fmt.Errorf("sqlite: malformed photo row %s: %s", id, fieldErrs[0].Error()))
 	}
 
-	return ph, capturedAtStr, nil
+	return ph, nil
 }
 
 func scanPhoto(row *sql.Row) (domain.Photo, error) {
-	ph, _, err := scanPhotoScanner(row)
-	return ph, err
+	return scanPhotoScanner(row)
 }
 
 func scanPhotoRow(rows *sql.Rows) (photoRow, error) {
-	ph, raw, err := scanPhotoScanner(rows)
+	ph, err := scanPhotoScanner(rows)
 	if err != nil {
 		return photoRow{}, err
 	}
-	return photoRow{photo: ph, capturedAtRaw: raw}, nil
+	return photoRow{photo: ph}, nil
 }

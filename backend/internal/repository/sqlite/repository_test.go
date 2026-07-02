@@ -39,8 +39,8 @@ var (
 	timeE = time.Date(2023, 12, 30, 12, 0, 0, 0, time.UTC)
 )
 
-// sortedPhotoIDs is the deterministic DESC order: captured_at DESC, id DESC.
-var sortedPhotoIDs = []string{photoA2, photoA1, photoB1, photoC1, photoD1, photoE1}
+// sortedPhotoIDs is the deterministic id DESC order (primary-key index, no temp sort).
+var sortedPhotoIDs = []string{photoE1, photoD1, photoC1, photoB1, photoA2, photoA1}
 
 const schema = `
 CREATE TABLE IF NOT EXISTS photos (
@@ -445,8 +445,9 @@ func TestListPhotos_limitOne(t *testing.T) {
 	if len(page.Items) != 1 {
 		t.Fatalf("expected 1 item, got %d", len(page.Items))
 	}
-	if page.Items[0].ID != photoA2 {
-		t.Errorf("expected photoA2 first, got %q", page.Items[0].ID)
+	// photoE1 has the highest id in the fixture and must come first with ORDER BY id DESC.
+	if page.Items[0].ID != photoE1 {
+		t.Errorf("expected photoE1 first (highest id DESC), got %q", page.Items[0].ID)
 	}
 	if page.NextToken == "" {
 		t.Error("expected NextToken for non-final page")
@@ -491,8 +492,8 @@ func TestListPhotos_filterClassOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPhotos: %v", err)
 	}
-	// mirid appears in: photoA1, photoB1, photoD1, photoE1
-	wantIDs := []string{photoA1, photoB1, photoD1, photoE1}
+	// mirid in: photoA1(001), photoB1(003), photoD1(005), photoE1(006) → id DESC: E1, D1, B1, A1
+	wantIDs := []string{photoE1, photoD1, photoB1, photoA1}
 	assertPhotoIDs(t, page.Items, wantIDs)
 }
 
@@ -503,8 +504,8 @@ func TestListPhotos_filterConfidenceOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPhotos: %v", err)
 	}
-	// confidence >= 0.8 in at least one pred: photoA1(0.9), photoA2(0.8), photoD1(0.8), photoE1(0.8)
-	wantIDs := []string{photoA2, photoA1, photoD1, photoE1}
+	// conf>=0.8: A1(001,0.9), A2(002,0.8), D1(005,0.8), E1(006,0.8) → id DESC: E1, D1, A2, A1
+	wantIDs := []string{photoE1, photoD1, photoA2, photoA1}
 	assertPhotoIDs(t, page.Items, wantIDs)
 }
 
@@ -539,9 +540,9 @@ func TestListPhotos_filterBothSamePrediction_positive(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListPhotos: %v", err)
 	}
-	// Only photoA1 {mirid,0.9} and photoE1 {mirid,0.8} have one pred satisfying both.
-	// photoD1 is excluded: mirid has 0.4 (<0.8) and thrips has 0.8 (wrong class).
-	wantIDs := []string{photoA1, photoE1}
+	// A1(001,mirid,0.9) and E1(006,mirid,0.8) have one pred satisfying both.
+	// D1 excluded: mirid=0.4 (<0.8), thrips=0.8 (wrong class). id DESC: E1, A1.
+	wantIDs := []string{photoE1, photoA1}
 	assertPhotoIDs(t, page.Items, wantIDs)
 }
 
@@ -666,23 +667,41 @@ func TestListPhotos_noDuplicatesOrOmissions(t *testing.T) {
 	}
 }
 
-func TestListPhotos_equalTimestampsResolvedByID(t *testing.T) {
+func TestListPhotos_idDESCOrderForEqualTimestamps(t *testing.T) {
 	r, _ := openFixture(t)
-	// photoA1 and photoA2 share the same captured_at; they must be separated by id DESC.
-	page, err := r.ListPhotos(context.Background(), ListPhotosParams{Limit: 1})
-	if err != nil {
-		t.Fatalf("ListPhotos: %v", err)
+	// photoA1(001) and photoA2(002) share the same captured_at.
+	// With id DESC ordering, A2(002) must appear before A1(001) on consecutive pages.
+	// We step through enough pages to reach the A1/A2 pair.
+	var allIDs []string
+	cursor := ""
+	for {
+		page, err := r.ListPhotos(context.Background(), ListPhotosParams{Limit: 1, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListPhotos: %v", err)
+		}
+		for _, ph := range page.Items {
+			allIDs = append(allIDs, ph.ID)
+		}
+		cursor = page.NextToken
+		if cursor == "" {
+			break
+		}
 	}
-	if page.Items[0].ID != photoA2 {
-		t.Errorf("expected photoA2 (higher id) first among equal timestamps, got %q", page.Items[0].ID)
+	a1Idx := -1
+	a2Idx := -1
+	for i, id := range allIDs {
+		if id == photoA1 {
+			a1Idx = i
+		}
+		if id == photoA2 {
+			a2Idx = i
+		}
 	}
-
-	page2, err := r.ListPhotos(context.Background(), ListPhotosParams{Limit: 1, Cursor: page.NextToken})
-	if err != nil {
-		t.Fatalf("ListPhotos page2: %v", err)
+	if a2Idx == -1 || a1Idx == -1 {
+		t.Fatalf("photoA1=%d or photoA2=%d not found in %v", a1Idx, a2Idx, allIDs)
 	}
-	if page2.Items[0].ID != photoA1 {
-		t.Errorf("expected photoA1 second, got %q", page2.Items[0].ID)
+	if a2Idx >= a1Idx {
+		t.Errorf("expected photoA2(002) before photoA1(001) in id DESC, got positions a2=%d a1=%d", a2Idx, a1Idx)
 	}
 }
 
@@ -890,6 +909,203 @@ func TestLoadPredictions_deterministicIDOrder(t *testing.T) {
 	}
 	if ph.Predictions[1].ClassID != domain.ClassMirid {
 		t.Errorf("expected second prediction mirid (higher id), got %q", ph.Predictions[1].ClassID)
+	}
+}
+
+// ---- Query plan: primary-key ordering must not use a temp B-tree ----
+
+func TestQueryPlan_primaryKeyNoBTree(t *testing.T) {
+	r, _ := openFixture(t)
+
+	// Helper: check that EXPLAIN QUERY PLAN output lacks "USE TEMP B-TREE FOR ORDER BY".
+	expectNoBTree := func(t *testing.T, label, q string, args ...any) {
+		t.Helper()
+		rows, err := r.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+q, args...)
+		if err != nil {
+			t.Fatalf("%s: EXPLAIN QUERY PLAN error: %v", label, err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+				t.Fatalf("%s: scan: %v", label, err)
+			}
+			if strings.Contains(strings.ToUpper(detail), "USE TEMP B-TREE") {
+				t.Errorf("%s: must not use a temp B-tree for ordering; got: %s", label, detail)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s: rows.Err: %v", label, err)
+		}
+	}
+
+	expectSearchPK := func(t *testing.T, label, q string, args ...any) {
+		t.Helper()
+		rows, err := r.db.QueryContext(context.Background(), "EXPLAIN QUERY PLAN "+q, args...)
+		if err != nil {
+			t.Fatalf("%s: EXPLAIN QUERY PLAN error: %v", label, err)
+		}
+		defer rows.Close()
+		foundSearch := false
+		for rows.Next() {
+			var id, parent, notUsed int
+			var detail string
+			if err := rows.Scan(&id, &parent, &notUsed, &detail); err != nil {
+				t.Fatalf("%s: scan: %v", label, err)
+			}
+			if strings.Contains(detail, "SEARCH") && strings.Contains(detail, "photos") {
+				foundSearch = true
+			}
+			if strings.Contains(strings.ToUpper(detail), "USE TEMP B-TREE") {
+				t.Errorf("%s: must not use a temp B-tree; got: %s", label, detail)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			t.Fatalf("%s: rows.Err: %v", label, err)
+		}
+		if !foundSearch {
+			t.Errorf("%s: expected index range seek (SEARCH) on photos table", label)
+		}
+	}
+
+	baseQ := "SELECT p.id, p.x, p.y, p.h, p.width, p.height, p.captured_at FROM photos p ORDER BY p.id DESC LIMIT ?"
+	cursorQ := "SELECT p.id, p.x, p.y, p.h, p.width, p.height, p.captured_at FROM photos p WHERE p.id < ? ORDER BY p.id DESC LIMIT ?"
+
+	expectNoBTree(t, "no-cursor unfiltered", baseQ, 51)
+	expectSearchPK(t, "cursor range seek", cursorQ, photoA1, 51)
+}
+
+// ---- Near location filter ----
+
+func TestListPhotos_nearFilter_basic(t *testing.T) {
+	r, _ := openFixture(t)
+	// photoA1 is at (5.0, 10.0); select within 1m radius of (5.1, 10.1).
+	near := &NearLocation{X: 5.1, Y: 10.1, Radius: 1.0}
+	page, err := r.ListPhotos(context.Background(), ListPhotosParams{Near: near})
+	if err != nil {
+		t.Fatalf("ListPhotos near: %v", err)
+	}
+	found := false
+	for _, ph := range page.Items {
+		if ph.ID == photoA1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected photoA1 within radius 1m of (5.1, 10.1)")
+	}
+	// photoB1 is at (7.0, 12.0) — 2.83m from (5.1, 10.1) > 1m radius
+	for _, ph := range page.Items {
+		if ph.ID == photoB1 {
+			t.Error("photoB1 is > 1m away and must not be included")
+		}
+	}
+}
+
+func TestListPhotos_nearFilter_inclusiveBoundary(t *testing.T) {
+	r, _ := openFixture(t)
+	// photoA1 is at (5.0, 10.0). Distance from (8.0, 10.0) is exactly 3.0m.
+	// Inclusive boundary: dist <= radius must include it.
+	near := &NearLocation{X: 8.0, Y: 10.0, Radius: 3.0}
+	page, err := r.ListPhotos(context.Background(), ListPhotosParams{Near: near})
+	if err != nil {
+		t.Fatalf("ListPhotos near boundary: %v", err)
+	}
+	found := false
+	for _, ph := range page.Items {
+		if ph.ID == photoA1 {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("photoA1 exactly at boundary (dist=3.0, radius=3.0) must be included")
+	}
+}
+
+func TestListPhotos_nearFilter_withClassFilter(t *testing.T) {
+	r, _ := openFixture(t)
+	// photoA1(5.0,10.0) has mirid; photoA2(6.0,11.0) has powdery_mildew.
+	// Near (5.5, 10.5) within 2m should include both; class=mirid keeps only A1.
+	cls := domain.ClassMirid
+	near := &NearLocation{X: 5.5, Y: 10.5, Radius: 2.0}
+	page, err := r.ListPhotos(context.Background(), ListPhotosParams{ClassID: &cls, Near: near})
+	if err != nil {
+		t.Fatalf("ListPhotos near+class: %v", err)
+	}
+	found := false
+	for _, ph := range page.Items {
+		if ph.ID == photoA1 {
+			found = true
+		}
+		if ph.ID == photoA2 {
+			t.Error("photoA2 has powdery_mildew, not mirid; must not appear with classId=mirid")
+		}
+	}
+	if !found {
+		t.Error("photoA1 must appear: within radius and has mirid prediction")
+	}
+}
+
+func TestListPhotos_nearFilter_pagination(t *testing.T) {
+	r, _ := openFixture(t)
+	// Select all 6 photos by using radius 40 (covers the whole 40x40 field from centre).
+	near := &NearLocation{X: 20.0, Y: 20.0, Radius: 40.0}
+	var seen []string
+	cursor := ""
+	for {
+		page, err := r.ListPhotos(context.Background(), ListPhotosParams{Limit: 2, Near: near, Cursor: cursor})
+		if err != nil {
+			t.Fatalf("ListPhotos near paged: %v", err)
+		}
+		for _, ph := range page.Items {
+			seen = append(seen, ph.ID)
+		}
+		cursor = page.NextToken
+		if cursor == "" {
+			break
+		}
+	}
+	if len(seen) != 6 {
+		t.Errorf("expected 6 photos from near radius 40, got %d: %v", len(seen), seen)
+	}
+	// No duplicates
+	counts := map[string]int{}
+	for _, id := range seen {
+		counts[id]++
+	}
+	for id, c := range counts {
+		if c != 1 {
+			t.Errorf("photo %q seen %d times", id, c)
+		}
+	}
+}
+
+func TestListPhotos_nearFilter_validation(t *testing.T) {
+	r, _ := openFixture(t)
+
+	cases := []struct {
+		name  string
+		near  NearLocation
+		field string
+	}{
+		{"x below range", NearLocation{X: -1, Y: 5, Radius: 3}, "nearX"},
+		{"x above range", NearLocation{X: 41, Y: 5, Radius: 3}, "nearX"},
+		{"y below range", NearLocation{X: 5, Y: -1, Radius: 3}, "nearY"},
+		{"y above range", NearLocation{X: 5, Y: 41, Radius: 3}, "nearY"},
+		{"radius zero", NearLocation{X: 5, Y: 5, Radius: 0}, "nearRadius"},
+		{"radius negative", NearLocation{X: 5, Y: 5, Radius: -1}, "nearRadius"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			near := tc.near
+			_, err := r.ListPhotos(context.Background(), ListPhotosParams{Near: &near})
+			if err == nil {
+				t.Fatal("expected validation error")
+			}
+			assertValidationError(t, err, tc.field)
+		})
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"net/http"
 
+	"scout/internal/apperror"
 	"scout/internal/observability"
 )
 
@@ -42,21 +43,40 @@ func NewRouter(cfg RouterConfig) http.Handler {
 		panic("httpapi: ThumbnailSvc is required")
 	}
 	auth := Authenticate(cfg.APIKey, cfg.Logger)
+	notAllowed := notAllowedJSON(cfg.Logger)
 	mux := http.NewServeMux()
+
 	mux.HandleFunc("GET /healthz", handleHealth)
+	mux.HandleFunc("/healthz", notAllowed("GET, HEAD"))
+
 	if cfg.MetricsHandler != nil {
 		mux.Handle("GET /metrics", cfg.MetricsHandler)
+		mux.HandleFunc("/metrics", notAllowed("GET, HEAD"))
 	}
+
 	// Thumbnail endpoint is public (no auth); registered before the /photos/{photoId}
 	// pattern so the more-specific path wins in Go 1.22+ ServeMux matching.
 	mux.HandleFunc("GET /photos/{photoId}/thumbnail",
 		handleGetThumbnail(cfg.Repo, cfg.ThumbnailSvc, cfg.Logger))
+	mux.HandleFunc("/photos/{photoId}/thumbnail", notAllowed("GET, HEAD"))
+
 	mux.Handle("POST /photos/{photoId}/upload-link",
 		auth(handleUploadLink(cfg.Repo, cfg.Storage, cfg.Logger)))
+	mux.HandleFunc("/photos/{photoId}/upload-link", notAllowed("POST"))
+
 	mux.Handle("GET /photos/{photoId}",
 		auth(handleGetPhoto(cfg.Repo, cfg.Storage, cfg.Logger)))
+	mux.HandleFunc("/photos/{photoId}", notAllowed("GET, HEAD"))
+
 	mux.Handle("GET /photos",
 		auth(handleListPhotos(cfg.Repo, cfg.Storage, cfg.Logger)))
+	mux.HandleFunc("/photos", notAllowed("GET, HEAD"))
+
+	// Catch-all: typed JSON 404 for any path not matched above.
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		WriteError(w, r, cfg.Logger, apperror.NewNotFound("not found", r.URL.Path))
+	})
+
 	return NewRouterWithMux(cfg, mux)
 }
 
@@ -84,6 +104,14 @@ func NewRouterWithMux(cfg RouterConfig, mux *http.ServeMux) http.Handler {
 			),
 		),
 	)
+}
+
+func notAllowedJSON(logger *slog.Logger) func(allowed string) http.HandlerFunc {
+	return func(allowed string) http.HandlerFunc {
+		return func(w http.ResponseWriter, r *http.Request) {
+			WriteError(w, r, logger, apperror.NewMethodNotAllowed(allowed))
+		}
+	}
 }
 
 func handleHealth(w http.ResponseWriter, r *http.Request) {

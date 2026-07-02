@@ -10,6 +10,10 @@ import styles from './PhotoCard.module.css';
 type Photo = components['schemas']['Photo'];
 type Prediction = components['schemas']['Prediction'];
 
+const BBOX_DIM_OPACITY   = 0.35;  // non-matching bbox is dimmed to this opacity
+const BBOX_SHADOW_STROKE = '1.25'; // outer shadow stroke width (SVG units)
+const BBOX_COLOR_STROKE  = '0.75'; // inner color stroke width (SVG units)
+
 interface BBoxOverlayProps {
   predictions: Prediction[];
   matchingClassId: string | null;
@@ -31,7 +35,7 @@ function BBoxOverlay({ predictions, matchingClassId, photoW, photoH }: BBoxOverl
         if (w <= 0 || h <= 0) return null;
         const color = CLASS_COLORS[pred.classId] ?? DEFAULT_CLASS_COLOR;
         const isMatch = matchingClassId == null || pred.classId === matchingClassId;
-        const opacity = isMatch ? 1 : 0.35;
+        const opacity = isMatch ? 1 : BBOX_DIM_OPACITY;
         const fillColor = isMatch ? `${color}1A` : 'none';
         return (
           <g key={i} opacity={opacity}>
@@ -39,14 +43,14 @@ function BBoxOverlay({ predictions, matchingClassId, photoW, photoH }: BBoxOverl
               x={x} y={y} width={w} height={h}
               fill="none"
               stroke="rgba(0,0,0,0.55)"
-              strokeWidth="1.25"
+              strokeWidth={BBOX_SHADOW_STROKE}
               vectorEffect="non-scaling-stroke"
             />
             <rect
               x={x} y={y} width={w} height={h}
               fill={fillColor}
               stroke={color}
-              strokeWidth="0.75"
+              strokeWidth={BBOX_COLOR_STROKE}
               vectorEffect="non-scaling-stroke"
             />
           </g>

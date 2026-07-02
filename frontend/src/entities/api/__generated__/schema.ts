@@ -162,6 +162,13 @@ export interface components {
             /** @description Identifier of the resource that was not found. */
             resource_id: string;
         } & components["schemas"]["ApiError"];
+        /** @description The HTTP method is not allowed on this endpoint. */
+        MethodNotAllowedError: {
+            /** @enum {string} */
+            code: "MethodNotAllowed";
+            /** @description Comma-separated list of allowed HTTP methods. */
+            allowed: string;
+        } & components["schemas"]["ApiError"];
         /** @description An internal server error occurred. */
         InternalServerError: {
             /** @enum {string} */
@@ -194,6 +201,15 @@ export interface components {
             };
             content: {
                 "application/json": components["schemas"]["NotFoundError"];
+            };
+        };
+        /** @description The HTTP method is not allowed on this endpoint. */
+        MethodNotAllowed: {
+            headers: {
+                [name: string]: unknown;
+            };
+            content: {
+                "application/json": components["schemas"]["MethodNotAllowedError"];
             };
         };
         /** @description An internal server error occurred. */
@@ -244,6 +260,7 @@ export interface operations {
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            405: components["responses"]["MethodNotAllowed"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -270,6 +287,7 @@ export interface operations {
             };
             401: components["responses"]["Unauthorized"];
             404: components["responses"]["NotFound"];
+            405: components["responses"]["MethodNotAllowed"];
             500: components["responses"]["InternalError"];
         };
     };
@@ -286,6 +304,12 @@ export interface operations {
                 classId?: string;
                 /** @description Keep photos that have at least one prediction with confidence at or above this value (inclusive). */
                 minConfidence?: number;
+                /** @description Center X coordinate (metres, [0,40]) of the greenhouse map filter circle. Requires nearY and nearRadius. */
+                nearX?: number;
+                /** @description Center Y coordinate (metres, [0,40]) of the greenhouse map filter circle. Requires nearX and nearRadius. */
+                nearY?: number;
+                /** @description Radius in metres of the map filter circle (positive). Requires nearX and nearY. */
+                nearRadius?: number;
             };
             header?: never;
             path?: never;
@@ -304,6 +328,7 @@ export interface operations {
             };
             400: components["responses"]["BadRequest"];
             401: components["responses"]["Unauthorized"];
+            405: components["responses"]["MethodNotAllowed"];
             500: components["responses"]["InternalError"];
         };
     };

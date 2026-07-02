@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 # Build context: repository root (docker build -f frontend/Dockerfile .)
 
-FROM node:24-bookworm-slim AS builder
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS builder
 
 WORKDIR /app
 
