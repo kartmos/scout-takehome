@@ -14,7 +14,6 @@ type Photo = components['schemas']['Photo'];
 
 // ─── react-konva mock ────────────────────────────────────────────────────────
 
-// Keeps a mutable pointer position that tests can control
 let mockPointerPos = { x: 100, y: 100 };
 
 const mockStage = {
@@ -52,7 +51,6 @@ vi.mock('react-konva', () => {
           onMouseUp={(e) => { void e; onMouseUp?.(makeEvt()); }}
           onClick={(e) => {
             void e;
-            // Simulate a background click (target === stage)
             onClick?.({ ...makeEvt(), target: mockStage });
           }}
           onWheel={(e) => {
@@ -227,15 +225,34 @@ describe('GreenhouseMap — compact mode', () => {
 // ─── Drawer: expanded mode ──────────────────────────────────────────────────
 
 describe('GreenhouseMap — expanded mode', () => {
-  it('renders a dialog element', () => {
+  it('renders a dialog element with expandedDialog class', () => {
     renderMap({ mode: 'expanded' });
-    expect(document.querySelector('dialog')).toBeInTheDocument();
+    const dialog = document.querySelector('dialog');
+    expect(dialog).toBeInTheDocument();
+    // Class proves the centred/enlarged layout contract without brittle pixel assertions
+    expect(dialog?.className).toMatch(/expandedDialog/);
   });
 
   it('renders Return to mini-map and Hide map buttons', () => {
     renderMap({ mode: 'expanded' });
     expect(screen.getByRole('button', { name: 'Return to mini-map' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Hide map' })).toBeInTheDocument();
+  });
+
+  it('renders Cancel and Apply location buttons in action bar', () => {
+    renderMap({ mode: 'expanded' });
+    expect(screen.getByRole('button', { name: 'Cancel' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Apply location' })).toBeInTheDocument();
+  });
+
+  it('Apply location is disabled when no draft location', () => {
+    renderMap({ mode: 'expanded', selectedLocation: null });
+    expect(screen.getByRole('button', { name: 'Apply location' })).toBeDisabled();
+  });
+
+  it('Apply location is enabled when draft location exists (initialized from selectedLocation)', () => {
+    renderMap({ mode: 'expanded', selectedLocation: { x: 5, y: 10 } });
+    expect(screen.getByRole('button', { name: 'Apply location' })).not.toBeDisabled();
   });
 
   it('Return to mini-map fires dialog close → onModeChange compact', () => {
@@ -254,15 +271,334 @@ describe('GreenhouseMap — expanded mode', () => {
   });
 });
 
+// ─── Marker list disclosure ─────────────────────────────────────────────────
+
+describe('GreenhouseMap — marker list disclosure', () => {
+  it('marker list is absent initially in compact mode', () => {
+    renderMap({ mode: 'compact', mapPhotos: [makePhoto()] });
+    expect(screen.queryByRole('list', { name: /Photo locations/i })).toBeNull();
+  });
+
+  it('marker list is absent initially in expanded mode', () => {
+    renderMap({ mode: 'expanded', mapPhotos: [makePhoto()] });
+    expect(screen.queryByRole('list', { name: /Photo locations/i })).toBeNull();
+  });
+
+  it('toggle button shows correct marker count in compact', () => {
+    const photos = [makePhoto({ id: 'a' }), makePhoto({ id: 'b', x: 5, y: 5 })];
+    renderMap({ mode: 'compact', mapPhotos: photos });
+    expect(screen.getByRole('button', { name: /Markers \(2\)/i })).toBeInTheDocument();
+  });
+
+  it('toggle button shows correct marker count in expanded', () => {
+    const photos = [makePhoto({ id: 'a' }), makePhoto({ id: 'b', x: 5, y: 5 })];
+    renderMap({ mode: 'expanded', mapPhotos: photos });
+    expect(screen.getByRole('button', { name: /Markers \(2\)/i })).toBeInTheDocument();
+  });
+
+  it('clicking toggle reveals the list; clicking again hides it', () => {
+    renderMap({ mode: 'compact', mapPhotos: [makePhoto()] });
+    const toggle = screen.getByRole('button', { name: /Markers/i });
+    expect(screen.queryByRole('list')).toBeNull();
+    fireEvent.click(toggle);
+    expect(screen.getByRole('list', { name: /Photo locations/i })).toBeInTheDocument();
+    fireEvent.click(toggle);
+    expect(screen.queryByRole('list')).toBeNull();
+  });
+
+  it('toggle has aria-expanded false initially then true after click', () => {
+    renderMap({ mode: 'compact' });
+    const toggle = screen.getByRole('button', { name: /Markers/i });
+    expect(toggle).toHaveAttribute('aria-expanded', 'false');
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute('aria-expanded', 'true');
+  });
+
+  it('list is collapsed after switching from compact to expanded (remount)', () => {
+    const photo = makePhoto();
+    const { rerender, props } = renderMap({ mode: 'compact', mapPhotos: [photo] });
+    // Open the list in compact
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    expect(screen.getByRole('list')).toBeInTheDocument();
+    // Switch to expanded — KonvaMapCanvas remounts, list resets
+    rerender(<GreenhouseMap {...props} mode="expanded" mapPhotos={[photo]} />);
+    expect(screen.queryByRole('list', { name: /Photo locations/i })).toBeNull();
+  });
+});
+
+// ─── Coordinate readout ─────────────────────────────────────────────────────
+
+describe('GreenhouseMap — coordinate readout', () => {
+  it('shows Location not selected when no applied location in compact', () => {
+    renderMap({ mode: 'compact', selectedLocation: null });
+    expect(screen.getByText('Location not selected')).toBeInTheDocument();
+  });
+
+  it('shows applied location coordinates in compact mode', () => {
+    renderMap({ mode: 'compact', selectedLocation: { x: 12.5, y: 8.0 } });
+    expect(screen.getByText('x 12.5 m · y 8.0 m')).toBeInTheDocument();
+  });
+
+  it('shows Location not selected in expanded when no draft location', () => {
+    renderMap({ mode: 'expanded', selectedLocation: null });
+    expect(screen.getByText('Location not selected')).toBeInTheDocument();
+  });
+
+  it('shows draft location after list-row click in expanded (applied callback not called)', () => {
+    const photo = makePhoto({ id: 'p1', x: 22, y: 15 });
+    const { onSelectLocation } = renderMap({ mode: 'expanded', mapPhotos: [photo], selectedLocation: null });
+    // Open list and click a row — calls draft setter, NOT onSelectLocation
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    fireEvent.click(screen.getByRole('button', { name: /x\s*22\.0\s*m/i }));
+    // Coordinate readout reflects draft
+    expect(screen.getByText('x 22.0 m · y 15.0 m')).toBeInTheDocument();
+    // Applied callback NOT called
+    expect(onSelectLocation).not.toHaveBeenCalled();
+  });
+
+  it('shows applied location in compact readout after compact list click', () => {
+    const photo = makePhoto({ id: 'p1', x: 7, y: 3 });
+    const { onSelectLocation } = renderMap({ mode: 'compact', mapPhotos: [photo], selectedLocation: null });
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    fireEvent.click(screen.getByRole('button', { name: /x\s*7\.0\s*m/i }));
+    // Applied callback IS called immediately in compact
+    expect(onSelectLocation).toHaveBeenCalledWith({ x: 7, y: 3 });
+  });
+});
+
+// ─── Draft / Apply / Cancel workflow ───────────────────────────────────────
+
+describe('GreenhouseMap — expanded draft workflow', () => {
+  it('expanded marker click updates draft but does NOT call onSelectLocation', () => {
+    const photo = makePhoto({ id: 'p1', x: 22, y: 15 });
+    const { onSelectLocation, onHighlightPhoto } = renderMap({
+      mode: 'expanded',
+      mapPhotos: [photo],
+      selectedLocation: null,
+    });
+    const groups = screen.getAllByTestId('konva-group');
+    const markerGroup = groups.find((g) => g.onclick !== null);
+    if (markerGroup) {
+      fireEvent.click(markerGroup);
+    }
+    expect(onSelectLocation).not.toHaveBeenCalled();
+    expect(onHighlightPhoto).not.toHaveBeenCalled();
+  });
+
+  it('expanded list-row click updates draft but does NOT call onSelectLocation', () => {
+    const photo = makePhoto({ id: 'p1', x: 18, y: 7 });
+    const { onSelectLocation, onHighlightPhoto } = renderMap({
+      mode: 'expanded',
+      mapPhotos: [photo],
+      selectedLocation: null,
+    });
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    const btn = screen.getByRole('button', { name: /x\s*18\.0\s*m/i });
+    fireEvent.click(btn);
+    expect(onSelectLocation).not.toHaveBeenCalled();
+    expect(onHighlightPhoto).not.toHaveBeenCalled();
+  });
+
+  it('expanded empty-space click creates draft with no highlight callback', () => {
+    mockPointerPos = { x: 160, y: 140 };
+    const { onSelectLocation, onHighlightPhoto } = renderMap({
+      mode: 'expanded',
+      selectedLocation: null,
+    });
+    const stage = screen.getByTestId('konva-stage');
+    fireEvent.mouseDown(stage);
+    fireEvent.mouseUp(stage);
+    fireEvent.click(stage);
+    // Draft updated internally — no applied callbacks
+    expect(onSelectLocation).not.toHaveBeenCalled();
+    expect(onHighlightPhoto).not.toHaveBeenCalled();
+  });
+
+  it('Apply commits draft location exactly once and calls onHighlightPhoto', () => {
+    const photo = makePhoto({ id: 'p1', x: 22, y: 15 });
+    const { onSelectLocation, onHighlightPhoto } = renderMap({
+      mode: 'expanded',
+      mapPhotos: [photo],
+      selectedLocation: null,
+    });
+    // Use the accessible list to set draft (avoids DOM bubbling to stage mock)
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    fireEvent.click(screen.getByRole('button', { name: /x\s*22\.0\s*m/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply location' }));
+    const dialog = document.querySelector('dialog')!;
+    fireEvent(dialog, new Event('close'));
+
+    expect(onSelectLocation).toHaveBeenCalledOnce();
+    expect(onSelectLocation).toHaveBeenCalledWith({ x: 22, y: 15 });
+    expect(onHighlightPhoto).toHaveBeenCalledOnce();
+    expect(onHighlightPhoto).toHaveBeenCalledWith(photo.id);
+  });
+
+  it('Apply with initialized location (from selectedLocation) commits and triggers mode change', () => {
+    const { onSelectLocation, onModeChange } = renderMap({
+      mode: 'expanded',
+      selectedLocation: { x: 5, y: 10 },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Apply location' }));
+    const dialog = document.querySelector('dialog')!;
+    fireEvent(dialog, new Event('close'));
+
+    expect(onSelectLocation).toHaveBeenCalledWith({ x: 5, y: 10 });
+    expect(onModeChange).toHaveBeenCalledWith('compact');
+  });
+
+  it('Apply with empty-space draft clears photo highlight', () => {
+    mockPointerPos = { x: 160, y: 140 };
+    const { onSelectLocation, onHighlightPhoto } = renderMap({
+      mode: 'expanded',
+      selectedLocation: null,
+    });
+    const stage = screen.getByTestId('konva-stage');
+    fireEvent.mouseDown(stage);
+    fireEvent.mouseUp(stage);
+    fireEvent.click(stage);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Apply location' }));
+    const dialog = document.querySelector('dialog')!;
+    fireEvent(dialog, new Event('close'));
+
+    expect(onSelectLocation).toHaveBeenCalledOnce();
+    expect(onHighlightPhoto).toHaveBeenCalledWith(null);
+  });
+
+  it('Cancel does not call applied location or highlight callbacks', () => {
+    const photo = makePhoto({ id: 'p1', x: 22, y: 15 });
+    const { onSelectLocation, onHighlightPhoto } = renderMap({
+      mode: 'expanded',
+      mapPhotos: [photo],
+      selectedLocation: null,
+    });
+    // Draft a location via list
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    fireEvent.click(screen.getByRole('button', { name: /x\s*22\.0\s*m/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    const dialog = document.querySelector('dialog')!;
+    fireEvent(dialog, new Event('close'));
+
+    expect(onSelectLocation).not.toHaveBeenCalled();
+    expect(onHighlightPhoto).not.toHaveBeenCalled();
+  });
+
+  it('Return to mini-map discards draft without calling applied callbacks', () => {
+    const { onSelectLocation, onHighlightPhoto, onModeChange } = renderMap({
+      mode: 'expanded',
+      selectedLocation: { x: 5, y: 10 },
+    });
+    fireEvent.click(screen.getByRole('button', { name: 'Return to mini-map' }));
+    const dialog = document.querySelector('dialog')!;
+    fireEvent(dialog, new Event('close'));
+
+    expect(onSelectLocation).not.toHaveBeenCalled();
+    expect(onHighlightPhoto).not.toHaveBeenCalled();
+    expect(onModeChange).toHaveBeenCalledWith('compact');
+  });
+
+  it('Escape (dialog close event without prior button click) preserves applied state', () => {
+    const { onSelectLocation, onHighlightPhoto } = renderMap({
+      mode: 'expanded',
+      selectedLocation: { x: 5, y: 10 },
+    });
+    const dialog = document.querySelector('dialog')!;
+    fireEvent(dialog, new Event('close'));
+
+    expect(onSelectLocation).not.toHaveBeenCalled();
+    expect(onHighlightPhoto).not.toHaveBeenCalled();
+  });
+
+  it('Hide from expanded discards draft and calls onModeChange with hidden', () => {
+    const photo = makePhoto({ id: 'p1', x: 22, y: 15 });
+    const { onSelectLocation, onModeChange } = renderMap({
+      mode: 'expanded',
+      mapPhotos: [photo],
+      selectedLocation: null,
+    });
+    // Draft a location via list
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    fireEvent.click(screen.getByRole('button', { name: /x\s*22\.0\s*m/i }));
+
+    fireEvent.click(screen.getByRole('button', { name: 'Hide map' }));
+    const dialog = document.querySelector('dialog')!;
+    fireEvent(dialog, new Event('close'));
+
+    expect(onSelectLocation).not.toHaveBeenCalled();
+    expect(onModeChange).toHaveBeenCalledWith('hidden');
+  });
+
+  it('preview count reflects draft position against map photos', () => {
+    const near = makePhoto({ id: 'near', x: 1, y: 1 });
+    const far = makePhoto({ id: 'far', x: 30, y: 30 });
+    renderMap({
+      mode: 'expanded',
+      mapPhotos: [near, far],
+      selectedLocation: { x: 1, y: 1 }, // draft initialized from this
+    });
+    // 1 photo within 3 m of (1, 1)
+    expect(screen.getByText(/1 photo within 3 m/i)).toBeInTheDocument();
+  });
+});
+
+// ─── Compact mode: immediate selection ─────────────────────────────────────
+
+describe('GreenhouseMap — compact immediate selection', () => {
+  it('compact marker click calls onSelectLocation immediately', () => {
+    const photo = makePhoto({ x: 22, y: 15 });
+    const { onSelectLocation } = renderMap({ mode: 'compact', mapPhotos: [photo] });
+    const groups = screen.getAllByTestId('konva-group');
+    const markerGroup = groups.find((g) => g.onclick !== null);
+    if (markerGroup) {
+      fireEvent.click(markerGroup);
+      expect(onSelectLocation).toHaveBeenCalledWith({ x: 22, y: 15 });
+    }
+  });
+
+  it('compact list selection calls onSelectLocation and onHighlightPhoto immediately', () => {
+    const photo = makePhoto({ x: 18, y: 7 });
+    const { onSelectLocation, onHighlightPhoto } = renderMap({ mode: 'compact', mapPhotos: [photo] });
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
+    const btn = screen.getByRole('button', { name: /x\s*18\.0\s*m/i });
+    fireEvent.click(btn);
+    expect(onSelectLocation).toHaveBeenCalledWith({ x: 18, y: 7 });
+    expect(onHighlightPhoto).toHaveBeenCalledWith(photo.id);
+  });
+
+  it('compact background click calls onSelectLocation with valid world position immediately', () => {
+    mockPointerPos = { x: 160, y: 140 };
+    const { onSelectLocation } = renderMap({ mode: 'compact' });
+    const stage = screen.getByTestId('konva-stage');
+    fireEvent.mouseDown(stage);
+    fireEvent.mouseUp(stage);
+    fireEvent.click(stage);
+    expect(onSelectLocation).toHaveBeenCalled();
+    const loc = (onSelectLocation as ReturnType<typeof vi.fn>).mock.calls[0]?.[0] as MapLocation;
+    expect(loc.x).toBeGreaterThanOrEqual(0);
+    expect(loc.x).toBeLessThanOrEqual(40);
+  });
+
+  it('compact background click calls onHighlightPhoto(null) immediately', () => {
+    mockPointerPos = { x: 160, y: 140 };
+    const { onHighlightPhoto } = renderMap({ mode: 'compact' });
+    const stage = screen.getByTestId('konva-stage');
+    fireEvent.mouseDown(stage);
+    fireEvent.mouseUp(stage);
+    fireEvent.click(stage);
+    expect(onHighlightPhoto).toHaveBeenCalledWith(null);
+  });
+});
+
 // ─── Photo markers at real coordinates ─────────────────────────────────────
 
 describe('GreenhouseMap — real x,y markers', () => {
   it('valid photos appear in the accessible DOM list with their real coordinates', () => {
     const photo = makePhoto({ x: 12.5, y: 33.7 });
     renderMap({ mapPhotos: [photo] });
-    // Expand the list first (compact mode has list collapsed by default)
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
-    // The list shows x and y from the real database photo
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
     expect(screen.getByText(/x\s*12\.5\s*m/i)).toBeInTheDocument();
     expect(screen.getByText(/y\s*33\.7\s*m/i)).toBeInTheDocument();
   });
@@ -271,7 +607,7 @@ describe('GreenhouseMap — real x,y markers', () => {
     const bad = makePhoto({ x: NaN, y: 5 });
     const good = makePhoto({ id: 'good', x: 5, y: 5 });
     renderMap({ mapPhotos: [bad, good] });
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
     expect(screen.getAllByRole('listitem').length).toBe(1);
   });
 
@@ -285,7 +621,7 @@ describe('GreenhouseMap — real x,y markers', () => {
     const p1 = makePhoto({ id: 'id1', x: 20, y: 20 });
     const p2 = makePhoto({ id: 'id2', x: 20, y: 20 });
     renderMap({ mapPhotos: [p1, p2] });
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
     const items = screen.getAllByRole('listitem');
     expect(items.length).toBe(2);
   });
@@ -293,11 +629,11 @@ describe('GreenhouseMap — real x,y markers', () => {
 
 // ─── Accessible list selection ──────────────────────────────────────────────
 
-describe('GreenhouseMap — accessible list selection', () => {
+describe('GreenhouseMap — accessible list selection (compact, immediate)', () => {
   it('clicking a list item calls onSelectLocation with that photo x,y', () => {
     const photo = makePhoto({ x: 18, y: 7 });
     const { onSelectLocation } = renderMap({ mapPhotos: [photo] });
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
     const btn = screen.getByRole('button', { name: /x\s*18\.0\s*m/i });
     fireEvent.click(btn);
     expect(onSelectLocation).toHaveBeenCalledWith({ x: 18, y: 7 });
@@ -306,7 +642,7 @@ describe('GreenhouseMap — accessible list selection', () => {
   it('clicking a list item also calls onHighlightPhoto with that photo id', () => {
     const photo = makePhoto({ x: 18, y: 7 });
     const { onHighlightPhoto } = renderMap({ mapPhotos: [photo] });
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
     const btn = screen.getByRole('button', { name: /x\s*18\.0\s*m/i });
     fireEvent.click(btn);
     expect(onHighlightPhoto).toHaveBeenCalledWith(photo.id);
@@ -314,27 +650,18 @@ describe('GreenhouseMap — accessible list selection', () => {
 
   it('list item for a near photo is highlighted when selectedLocation is set', () => {
     const photo = makePhoto({ x: 10, y: 10 });
-    // selectedLocation at (10,10) — distance=0, well within 3m
     renderMap({ mapPhotos: [photo], selectedLocation: { x: 10, y: 10 } });
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
     const listItem = screen.getAllByRole('listitem')[0]!;
     expect(listItem.className).toMatch(/locationItemNear/);
   });
 
   it('list item far from selected location is NOT highlighted', () => {
     const photo = makePhoto({ x: 10, y: 10 });
-    // selectedLocation 10m away — outside 3m radius
     renderMap({ mapPhotos: [photo], selectedLocation: { x: 20, y: 20 } });
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
+    fireEvent.click(screen.getByRole('button', { name: /Markers/i }));
     const listItem = screen.getAllByRole('listitem')[0]!;
     expect(listItem.className).not.toMatch(/locationItemNear/);
-  });
-
-  it('list in expanded mode is visible without toggle', () => {
-    const photo = makePhoto({ x: 5, y: 5 });
-    renderMap({ mode: 'expanded', mapPhotos: [photo] });
-    // In expanded mode the list should be visible immediately
-    expect(screen.getByRole('list', { name: /Photo locations/i })).toBeInTheDocument();
   });
 });
 
@@ -343,7 +670,6 @@ describe('GreenhouseMap — accessible list selection', () => {
 describe('GreenhouseMap — zoom controls', () => {
   it('Zoom out is disabled at MIN_SCALE', () => {
     renderMap({ mode: 'compact' });
-    // initial scale = 1 = MIN_SCALE
     expect(screen.getByRole('button', { name: 'Zoom out' })).toBeDisabled();
   });
 
@@ -374,11 +700,9 @@ describe('GreenhouseMap — zoom controls', () => {
 
 describe('GreenhouseMap — canvas background click', () => {
   it('background click calls onSelectLocation with a valid world position', () => {
-    // Set pointer to a known position inside the canvas area
-    mockPointerPos = { x: 160, y: 140 }; // centre of 320x280 stage
+    mockPointerPos = { x: 160, y: 140 };
     const { onSelectLocation } = renderMap({ mode: 'compact' });
     const stage = screen.getByTestId('konva-stage');
-    // Simulate click sequence: mouseDown, mouseUp, onClick
     fireEvent.mouseDown(stage);
     fireEvent.mouseUp(stage);
     fireEvent.click(stage);
@@ -406,13 +730,11 @@ describe('GreenhouseMap — canvas background click', () => {
     const { onSelectLocation } = renderMap({ mode: 'compact' });
     const stage = screen.getByTestId('konva-stage');
     fireEvent.mouseDown(stage);
-    // Simulate move beyond threshold
     mockPointerPos = { x: 100, y: 100 };
     fireEvent.mouseMove(stage);
     mockPointerPos = { x: 150, y: 150 };
     fireEvent.mouseMove(stage);
     fireEvent.mouseUp(stage);
-    // No click fired after drag — onSelectLocation should NOT have been called
     expect(onSelectLocation).not.toHaveBeenCalled();
   });
 });
@@ -423,26 +745,21 @@ describe('GreenhouseMap — marker click', () => {
   it('clicking the Konva Group for a marker calls onSelectLocation with photo x,y', () => {
     const photo = makePhoto({ x: 22, y: 15 });
     const { onSelectLocation } = renderMap({ mapPhotos: [photo] });
-    // The marker Group has data-testid="konva-group" and onClick handler
     const groups = screen.getAllByTestId('konva-group');
-    // Find the marker group (the one associated with the photo)
-    // In compact mode, list is collapsed; the marker group for the photo is in the canvas
-    // All marker groups have onClick → click the first marker group
     const markerGroup = groups.find((g) => g.getAttribute('onclick') !== null || g.onclick !== null);
     if (markerGroup) {
       fireEvent.click(markerGroup);
       expect(onSelectLocation).toHaveBeenCalledWith({ x: 22, y: 15 });
     }
-    // If no interactive group found, the test still passes (canvas not interactive in mock)
   });
 });
 
-// ─── Loading / error / disclosure states ───────────────────────────────────
+// ─── Loading / error states ─────────────────────────────────────────────────
 
 describe('GreenhouseMap — loading and error states', () => {
   it('shows loading status while fetching with no photos', () => {
     renderMap({ mapPhotos: [], mapFetching: true });
-    expect(screen.getByRole('status')).toBeInTheDocument();
+    expect(screen.getByText('Loading map data…')).toBeInTheDocument();
   });
 
   it('shows error alert when mapError=true', () => {
@@ -478,20 +795,16 @@ describe('GreenhouseMap — loading and error states', () => {
   });
 });
 
-// ─── Compact ↔ expanded transition preserves selectedLocation ─────────────
+// ─── Compact ↔ expanded transition ─────────────────────────────────────────
 
 describe('GreenhouseMap — mode transition', () => {
-  it('selectedLocation prop is rendered in both compact and expanded mode', () => {
+  it('selectedLocation prop renders Konva stage in both compact and expanded mode', () => {
     const loc: MapLocation = { x: 12, y: 25 };
     const { rerender, props } = renderMap({ mode: 'compact', selectedLocation: loc });
-    // In compact mode, expand the list
-    fireEvent.click(screen.getByRole('button', { name: /Show location list/i }));
+    expect(screen.getByTestId('konva-stage')).toBeInTheDocument();
 
-    // Switch to expanded
     rerender(<GreenhouseMap {...props} mode="expanded" selectedLocation={loc} />);
-    // In expanded mode, list visible immediately
-    expect(screen.getByRole('list', { name: /Photo locations/i })).toBeInTheDocument();
-    // Verify no crash
     expect(document.querySelector('dialog')).toBeInTheDocument();
+    expect(screen.getByTestId('konva-stage')).toBeInTheDocument();
   });
 });

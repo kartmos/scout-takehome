@@ -5,8 +5,8 @@ metadata:
   type: project
 ---
 
-Task 016.1 (greenhouse map redesign) DONE (2026-07-02); 61 focused tests pass (mapAssignment: 9, GreenhouseMap: 30, GalleryPage: 22); typecheck clean, lint zero errors, production build passes, web container healthy at http://localhost:8090. Awaiting commit authorization.
+Task 016.3 (greenhouse map UX hardening) DONE (2026-07-02); 67 GreenhouseMap tests pass; typecheck clean, lint zero warnings, production build passes, web container healthy at http://localhost:8090. Awaiting commit authorization.
 
-**Why:** 016.1 replaced the rejected SVG/zoom/pan/cluster map with a schematic HTML/CSS drawer (hidden/compact/expanded), deterministic photo assignment via djb2 hash, bounded 200-photo query, point/class/confidence filter intersection, viewer navigation scoped to selected point.
+**Why:** 016.3 polishes the Konva map UX: centred expanded dialog (fixed/inset:0/margin:auto, min(98vw,1440px)×min(94dvh,960px)), collapsed marker disclosure (Markers (N) ▼/▲), draft/apply workflow in expanded mode (no gallery change until Apply), action bar with preview count, compact stays quick-apply, coordinate readout beside zoom controls.
 
-**How to apply:** Do not commit or push until user explicitly authorizes. The complete frontend/backend test suites were intentionally not run per the task's proportionate verification requirement.
+**How to apply:** Do not commit or push until user explicitly authorizes. Complete frontend/backend suites intentionally not run per proportionate verification.

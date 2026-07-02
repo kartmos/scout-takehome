@@ -75,6 +75,10 @@ function getMarkerColor(photo: Photo, classId: string | null, minConfidence: num
 }
 
 // ─── Konva canvas sub-component ──────────────────────────────────────────────
+//
+// Receives callbacks from the shell. Compact mode passes parent callbacks
+// (immediate apply). Expanded mode passes draft setters (no apply until
+// the action bar's Apply button is pressed).
 
 interface KonvaMapCanvasProps {
   viewState: ViewState;
@@ -90,7 +94,6 @@ interface KonvaMapCanvasProps {
   mapError: boolean;
   onRetry: () => void;
   hasMore: boolean;
-  compact: boolean;
 }
 
 function KonvaMapCanvas({
@@ -107,7 +110,6 @@ function KonvaMapCanvas({
   mapError,
   onRetry,
   hasMore,
-  compact,
 }: KonvaMapCanvasProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const stageRef = useRef<Konva.Stage>(null);
@@ -115,7 +117,6 @@ function KonvaMapCanvas({
   const [hoveredId, setHoveredId] = useState<string | null>(null);
   const [listExpanded, setListExpanded] = useState(false);
 
-  // Mutable refs to read current values in event handlers without stale closures
   const viewRef = useRef(viewState);
   viewRef.current = viewState;
   const stageSizeRef = useRef(stageSize);
@@ -136,7 +137,6 @@ function KonvaMapCanvas({
       if (width > 0 && height > 0) {
         const newSize = { w: Math.floor(width), h: Math.floor(height) };
         setStageSize(newSize);
-        // Re-clamp position for new size (applyPan with zero delta just clamps)
         onViewChange(applyPan(viewRef.current, 0, 0, newSize.w, newSize.h));
       }
     });
@@ -168,7 +168,7 @@ function KonvaMapCanvas({
 
   const handleMouseDown = useCallback((e: Konva.KonvaEventObject<MouseEvent>) => {
     void e;
-    isDraggingRef.current = false; // reset at start of each interaction
+    isDraggingRef.current = false;
     const pos = getPointerPos();
     if (!pos) return;
     mouseStartRef.current = pos;
@@ -463,8 +463,13 @@ function KonvaMapCanvas({
         )}
       </div>
 
-      {/* Zoom controls */}
+      {/* Zoom controls with coordinate readout */}
       <div className={styles.zoomControls} role="group" aria-label="Map zoom controls">
+        <span className={styles.coordReadout} aria-live="polite" aria-atomic="true">
+          {selectedLocation !== null
+            ? `x ${selectedLocation.x.toFixed(1)} m · y ${selectedLocation.y.toFixed(1)} m`
+            : 'Location not selected'}
+        </span>
         <button
           type="button"
           className={styles.zoomBtn}
@@ -500,20 +505,18 @@ function KonvaMapCanvas({
         {hasMore && ' · Showing first 200 matching photos'}
       </p>
 
-      {/* Accessible DOM location list */}
+      {/* Accessible DOM marker list — collapsed by default in both modes */}
       <div className={styles.locationListWrapper}>
-        {compact && (
-          <button
-            type="button"
-            className={styles.listToggle}
-            aria-expanded={listExpanded}
-            aria-controls="map-location-list"
-            onClick={() => setListExpanded((v) => !v)}
-          >
-            {listExpanded ? '▲ Hide location list' : '▼ Show location list'}
-          </button>
-        )}
-        {(!compact || listExpanded) && (
+        <button
+          type="button"
+          className={styles.listToggle}
+          aria-expanded={listExpanded}
+          aria-controls="map-location-list"
+          onClick={() => setListExpanded((v) => !v)}
+        >
+          Markers ({validPhotos.length}) {listExpanded ? '▲' : '▼'}
+        </button>
+        {listExpanded && (
           <ul
             id="map-location-list"
             className={styles.locationList}
@@ -570,19 +573,32 @@ export function GreenhouseMap({
   const expandBtnRef = useRef<HTMLButtonElement>(null);
   const launcherRef = useRef<HTMLButtonElement>(null);
   const modeAfterClose = useRef<'compact' | 'hidden'>('compact');
+  // Tracks whether dialog close is triggered by Apply (prevents Cancel overwriting Apply)
+  const pendingApplyRef = useRef(false);
   const prevModeRef = useRef(mode);
+
+  // Draft state: local candidate while in expanded mode
+  const [draftLocation, setDraftLocation] = useState<MapLocation | null>(null);
+  const [draftHighlightedId, setDraftHighlightedId] = useState<string | null>(null);
 
   const [viewState, setViewState] = useState<ViewState>(initialViewState);
 
+  // Initialize draft from currently applied location when entering expanded mode.
+  // Intentionally excludes selectedLocation/highlightedPhotoId from deps so that
+  // filter changes during expanded mode do not reset the draft mid-session.
   useEffect(() => {
     if (mode === 'expanded') {
+      setDraftLocation(selectedLocation);
+      setDraftHighlightedId(highlightedPhotoId);
       modeAfterClose.current = 'compact';
       if (dialogRef.current && !dialogRef.current.open) {
         dialogRef.current.showModal();
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mode]);
 
+  // Focus management: return focus to an appropriate control after dialog closes
   useEffect(() => {
     const prev = prevModeRef.current;
     prevModeRef.current = mode;
@@ -594,13 +610,53 @@ export function GreenhouseMap({
 
   const handleViewChange = useCallback((v: ViewState) => setViewState(v), []);
 
-  const canvasProps: KonvaMapCanvasProps = {
+  // Stable draft setters typed to match KonvaMapCanvasProps callbacks
+  const handleDraftLocationChange = useCallback((loc: MapLocation | null) => {
+    setDraftLocation(loc);
+  }, []);
+  const handleDraftHighlightChange = useCallback((id: string | null) => {
+    setDraftHighlightedId(id);
+  }, []);
+
+  // Preview count for the action bar: derived from map data + draft position
+  const draftNearCount = useMemo(() => {
+    if (draftLocation === null) return 0;
+    return mapPhotos.filter(
+      (p) => isValidWorldCoord(p.x, p.y) && isNear(p.x, p.y, draftLocation.x, draftLocation.y),
+    ).length;
+  }, [draftLocation, mapPhotos]);
+
+  // ── Expanded-mode action handlers ─────────────────────────────────────────
+
+  const handleApply = useCallback(() => {
+    if (draftLocation === null) return;
+    pendingApplyRef.current = true;
+    onSelectLocation(draftLocation);
+    onHighlightPhoto(draftHighlightedId);
+    modeAfterClose.current = 'compact';
+    dialogRef.current?.close();
+  }, [draftLocation, draftHighlightedId, onSelectLocation, onHighlightPhoto]);
+
+  const handleCancelOrReturn = useCallback(() => {
+    modeAfterClose.current = 'compact';
+    dialogRef.current?.close();
+  }, []);
+
+  const handleHideFromExpanded = useCallback(() => {
+    modeAfterClose.current = 'hidden';
+    dialogRef.current?.close();
+  }, []);
+
+  const handleDialogClose = useCallback(() => {
+    pendingApplyRef.current = false;
+    onModeChange(modeAfterClose.current);
+  }, [onModeChange]);
+
+  // ── Canvas prop sets ──────────────────────────────────────────────────────
+
+  const baseCanvasProps = {
     viewState,
     onViewChange: handleViewChange,
-    selectedLocation,
-    onSelectLocation,
-    highlightedPhotoId,
-    onHighlightPhoto,
     classId,
     minConfidence,
     mapPhotos,
@@ -608,10 +664,26 @@ export function GreenhouseMap({
     mapError,
     onRetry,
     hasMore,
-    compact: mode === 'compact',
   };
 
-  // ── Hidden: launcher button ────────────────────────────────────────────────
+  const compactCanvasProps: KonvaMapCanvasProps = {
+    ...baseCanvasProps,
+    selectedLocation,
+    onSelectLocation,
+    highlightedPhotoId,
+    onHighlightPhoto,
+  };
+
+  // Expanded canvas uses draft state instead of applied state
+  const expandedCanvasProps: KonvaMapCanvasProps = {
+    ...baseCanvasProps,
+    selectedLocation: draftLocation,
+    onSelectLocation: handleDraftLocationChange,
+    highlightedPhotoId: draftHighlightedId,
+    onHighlightPhoto: handleDraftHighlightChange,
+  };
+
+  // ── Hidden: launcher button ───────────────────────────────────────────────
 
   if (mode === 'hidden') {
     return (
@@ -634,7 +706,7 @@ export function GreenhouseMap({
     );
   }
 
-  // ── Compact: fixed bottom-right drawer ────────────────────────────────────
+  // ── Compact: fixed bottom-right drawer — immediate selection ─────────────
 
   if (mode === 'compact') {
     return (
@@ -659,19 +731,19 @@ export function GreenhouseMap({
             Hide
           </button>
         </div>
-        <KonvaMapCanvas {...canvasProps} compact={true} />
+        <KonvaMapCanvas {...compactCanvasProps} />
       </div>
     );
   }
 
-  // ── Expanded: native dialog ───────────────────────────────────────────────
+  // ── Expanded: native dialog — draft + confirm workflow ───────────────────
 
   return (
     <dialog
       ref={dialogRef}
       className={styles.expandedDialog}
       aria-label="Greenhouse map"
-      onClose={() => onModeChange(modeAfterClose.current)}
+      onClose={handleDialogClose}
     >
       <div className={styles.drawerHeader}>
         <span className={styles.drawerTitle}>Greenhouse map</span>
@@ -679,10 +751,7 @@ export function GreenhouseMap({
           type="button"
           className={styles.headerBtn}
           aria-label="Return to mini-map"
-          onClick={() => {
-            modeAfterClose.current = 'compact';
-            dialogRef.current?.close();
-          }}
+          onClick={handleCancelOrReturn}
         >
           Mini-map
         </button>
@@ -690,16 +759,35 @@ export function GreenhouseMap({
           type="button"
           className={styles.headerBtn}
           aria-label="Hide map"
-          onClick={() => {
-            modeAfterClose.current = 'hidden';
-            dialogRef.current?.close();
-          }}
+          onClick={handleHideFromExpanded}
         >
           Hide
         </button>
       </div>
       <div className={styles.dialogBody}>
-        <KonvaMapCanvas {...canvasProps} compact={false} />
+        <KonvaMapCanvas {...expandedCanvasProps} />
+      </div>
+      <div className={styles.actionBar}>
+        <button
+          type="button"
+          className={styles.headerBtn}
+          onClick={handleCancelOrReturn}
+        >
+          Cancel
+        </button>
+        <span className={styles.previewCount} aria-live="polite" aria-atomic="true">
+          {draftLocation !== null
+            ? `${draftNearCount} photo${draftNearCount !== 1 ? 's' : ''} within ${NEAR_RADIUS_METRES} m`
+            : 'Select a location on the map'}
+        </span>
+        <button
+          type="button"
+          className={styles.applyBtn}
+          onClick={handleApply}
+          disabled={draftLocation === null}
+        >
+          Apply location
+        </button>
       </div>
     </dialog>
   );
