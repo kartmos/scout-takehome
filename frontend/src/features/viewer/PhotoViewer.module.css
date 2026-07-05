@@ -9,6 +9,8 @@
   background: var(--color-surface);
   color: var(--color-text);
   width: min(96vw, 1100px);
+  height: min(96vh, 800px);
+  height: min(96dvh, 800px);
   max-height: min(96dvh, 800px);
   display: flex;
   flex-direction: column;
