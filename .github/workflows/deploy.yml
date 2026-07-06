@@ -1,0 +1,373 @@
+name: Deploy
+
+# Automatic path: fires when the "Integration" workflow completes on `main`.
+# This job additionally polls the GitHub Actions API for a matching, successful
+# "CI" run on the exact same commit SHA before doing anything else. Both gates
+# must pass for the same immutable head_sha; a pull-request run of Integration
+# never triggers a deployment (see the `gate` job `if:` condition below).
+#
+# Manual path: workflow_dispatch is the explicit first-deploy/recovery route.
+# It takes either an exact 40-character commit SHA (build + push + deploy) or
+# an already-published immutable `sha-<short>` tag (deploy only, no rebuild).
+# It never silently deploys the moving `main` tip.
+#
+# PRODUCTION_DEPLOY_ENABLED (repository Actions variable) gates only the
+# automatic path, so this workflow can be merged before the server, DNS, and
+# Environment secrets are ready; workflow_dispatch remains available to
+# perform the first deployment. See README.md "Deploy to a VPS with Caddy and
+# GHCR" and deploystepbystep.md section 7.10.
+
+on:
+  workflow_run:
+    workflows: ["Integration"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Exact 40-character commit SHA on main to build and deploy (mutually exclusive with image_tag)"
+        required: false
+        type: string
+      image_tag:
+        description: "Existing immutable sha-<short> tag to deploy without rebuilding (mutually exclusive with commit_sha)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize production deployments. A newer push must not cancel a deployment
+# that is already in progress; queued runs deploy sequentially instead.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  # ── Resolve what (if anything) should be deployed, and from where ─────────
+  gate:
+    name: Resolve and gate deployment
+    runs-on: ubuntu-latest
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' &&
+       github.event.workflow_run.event == 'push' &&
+       github.event.workflow_run.head_branch == 'main' &&
+       github.event.workflow_run.conclusion == 'success')
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      should_deploy: ${{ steps.resolve.outputs.should_deploy }}
+      skip_build: ${{ steps.resolve.outputs.skip_build }}
+      sha: ${{ steps.resolve.outputs.sha }}
+      image_tag: ${{ steps.resolve.outputs.image_tag }}
+    steps:
+      - name: Validate manual dispatch inputs
+        if: github.event_name == 'workflow_dispatch'
+        id: dispatch
+        run: |
+          set -Eeuo pipefail
+          commit_sha="${{ inputs.commit_sha }}"
+          image_tag="${{ inputs.image_tag }}"
+
+          if [ -n "$commit_sha" ] && [ -n "$image_tag" ]; then
+            echo "::error::Provide exactly one of commit_sha or image_tag, not both." >&2
+            exit 1
+          fi
+          if [ -z "$commit_sha" ] && [ -z "$image_tag" ]; then
+            echo "::error::Provide either commit_sha (to build+deploy) or image_tag (to redeploy an existing image)." >&2
+            exit 1
+          fi
+          if [ -n "$commit_sha" ] && ! [[ "$commit_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::commit_sha must be a full 40-character lowercase hex SHA, got: $commit_sha" >&2
+            exit 1
+          fi
+          if [ -n "$image_tag" ] && ! [[ "$image_tag" =~ ^sha-[0-9a-f]{7,40}$ ]]; then
+            echo "::error::image_tag must match sha-<7-40 lowercase hex chars>, got: $image_tag" >&2
+            exit 1
+          fi
+
+          echo "commit_sha=$commit_sha" >> "$GITHUB_OUTPUT"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Check PRODUCTION_DEPLOY_ENABLED
+        if: github.event_name == 'workflow_run'
+        id: kill_switch
+        run: |
+          set -Eeuo pipefail
+          if [ "${{ vars.PRODUCTION_DEPLOY_ENABLED }}" = "true" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::PRODUCTION_DEPLOY_ENABLED is not 'true'; skipping automatic deployment for this commit. Use workflow_dispatch for a first/manual deployment." >&2
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Fails closed: absent, pending past the timeout, cancelled, skipped,
+      # or unsuccessful CI all stop the deployment. Never trusts a CI run for
+      # a different SHA.
+      - name: Wait for a matching successful CI run on the same SHA
+        if: github.event_name == 'workflow_run' && steps.kill_switch.outputs.enabled == 'true'
+        id: ci_gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -Eeuo pipefail
+          timeout_seconds=900
+          interval_seconds=15
+          grace_seconds=90
+          elapsed=0
+
+          while true; do
+            runs_json=$(gh api "repos/${REPO}/actions/workflows/ci.yml/runs?head_sha=${HEAD_SHA}&event=push&per_page=5")
+            count=$(echo "$runs_json" | jq '.workflow_runs | length')
+
+            if [ "$count" -eq 0 ]; then
+              status="absent"
+              conclusion="absent"
+            else
+              status=$(echo "$runs_json" | jq -r '.workflow_runs[0].status')
+              conclusion=$(echo "$runs_json" | jq -r '.workflow_runs[0].conclusion // "pending"')
+            fi
+            echo "CI for ${HEAD_SHA}: status=${status} conclusion=${conclusion} (elapsed ${elapsed}s)"
+
+            if [ "$status" = "completed" ]; then
+              if [ "$conclusion" = "success" ]; then
+                break
+              fi
+              echo "::error::CI run for ${HEAD_SHA} concluded '${conclusion}', not success. Failing closed." >&2
+              exit 1
+            fi
+
+            if [ "$status" = "absent" ] && [ "$elapsed" -ge "$grace_seconds" ]; then
+              echo "::error::No CI run found for ${HEAD_SHA} after ${grace_seconds}s grace period. Failing closed." >&2
+              exit 1
+            fi
+            if [ "$elapsed" -ge "$timeout_seconds" ]; then
+              echo "::error::Timed out after ${timeout_seconds}s waiting for CI on ${HEAD_SHA} (last status=${status}). Failing closed." >&2
+              exit 1
+            fi
+
+            sleep "$interval_seconds"
+            elapsed=$((elapsed + interval_seconds))
+          done
+
+      - name: Resolve deployment parameters
+        id: resolve
+        run: |
+          set -Eeuo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            if [ -n "${{ steps.dispatch.outputs.image_tag }}" ]; then
+              {
+                echo "should_deploy=true"
+                echo "skip_build=true"
+                echo "image_tag=${{ steps.dispatch.outputs.image_tag }}"
+                echo "sha="
+              } >> "$GITHUB_OUTPUT"
+            else
+              {
+                echo "should_deploy=true"
+                echo "skip_build=false"
+                echo "sha=${{ steps.dispatch.outputs.commit_sha }}"
+              } >> "$GITHUB_OUTPUT"
+            fi
+          elif [ "${{ steps.kill_switch.outputs.enabled }}" = "true" ]; then
+            {
+              echo "should_deploy=true"
+              echo "skip_build=false"
+              echo "sha=${{ github.event.workflow_run.head_sha }}"
+            } >> "$GITHUB_OUTPUT"
+          else
+            echo "should_deploy=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ── Build and publish immutable images for both platforms ─────────────────
+  build_and_push:
+    name: Build and publish images
+    needs: gate
+    if: needs.gate.outputs.should_deploy == 'true' && needs.gate.outputs.skip_build != 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: production
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image_tag: ${{ steps.names.outputs.tag }}
+      api_image: ${{ steps.names.outputs.api_image }}
+      web_image: ${{ steps.names.outputs.web_image }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha }}
+
+      - name: Compute deterministic image names and tags
+        id: names
+        run: |
+          set -Eeuo pipefail
+          repo_lower=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')
+          owner="${repo_lower%%/*}"
+          repo="${repo_lower##*/}"
+          short_sha=$(echo "${{ needs.gate.outputs.sha }}" | cut -c1-7)
+          api_image="ghcr.io/${owner}/${repo}-api"
+          web_image="ghcr.io/${owner}/${repo}-web"
+          tag="sha-${short_sha}"
+
+          api_tags="${api_image}:${tag}"
+          web_tags="${web_image}:${tag}"
+          # Only advance the mutable `main` convenience tag for the automatic
+          # push-gated path; a manual rebuild of an older SHA must not move
+          # `main` backward. Deployment always uses the immutable sha- tag.
+          if [ "${{ github.event_name }}" = "workflow_run" ]; then
+            api_tags="${api_tags}"$'\n'"${api_image}:main"
+            web_tags="${web_tags}"$'\n'"${web_image}:main"
+          fi
+
+          {
+            echo "api_image=${api_image}"
+            echo "web_image=${web_image}"
+            echo "tag=${tag}"
+            echo "api_tags<<TAGS_EOF"
+            echo "$api_tags"
+            echo "TAGS_EOF"
+            echo "web_tags<<TAGS_EOF"
+            echo "$web_tags"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-qemu-action@v3
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: backend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.names.outputs.api_tags }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,scope=api,mode=max
+
+      - name: Build and push web image (linux/amd64, linux/arm64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: frontend/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VITE_SCOUT_API_KEY=${{ secrets.VITE_SCOUT_API_KEY }}
+          tags: ${{ steps.names.outputs.web_tags }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,scope=web,mode=max
+
+      - name: Job summary
+        run: |
+          {
+            echo "### Published images"
+            echo ""
+            echo "- API: \`${{ steps.names.outputs.api_image }}:${{ steps.names.outputs.tag }}\`"
+            echo "- Web: \`${{ steps.names.outputs.web_image }}:${{ steps.names.outputs.tag }}\`"
+            echo "- Platforms: linux/amd64, linux/arm64"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ── Deploy the immutable release over SSH ──────────────────────────────────
+  deploy:
+    name: Deploy to production
+    needs: [gate, build_and_push]
+    if: |
+      always() &&
+      needs.gate.outputs.should_deploy == 'true' &&
+      (needs.gate.outputs.skip_build == 'true' || needs.build_and_push.result == 'success')
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: production
+    steps:
+      - name: Resolve release tag
+        id: release
+        run: |
+          set -Eeuo pipefail
+          if [ "${{ needs.gate.outputs.skip_build }}" = "true" ]; then
+            tag="${{ needs.gate.outputs.image_tag }}"
+          else
+            tag="${{ needs.build_and_push.outputs.image_tag }}"
+          fi
+          if ! [[ "$tag" =~ ^sha-[0-9a-f]{7,40}$ ]]; then
+            echo "::error::Resolved release tag '$tag' is not a valid immutable sha-<hex> tag." >&2
+            exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.gate.outputs.sha != '' && needs.gate.outputs.sha || github.sha }}
+          sparse-checkout: |
+            deploy
+          sparse-checkout-cone-mode: false
+
+      - name: Prepare temporary SSH credentials
+        run: |
+          set -Eeuo pipefail
+          umask 077
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_PRIVATE_KEY }}" > ~/.ssh/scout_deploy_key
+          chmod 600 ~/.ssh/scout_deploy_key
+          printf '%s\n' "${{ secrets.DEPLOY_SSH_KNOWN_HOSTS }}" > ~/.ssh/scout_known_hosts
+          chmod 600 ~/.ssh/scout_known_hosts
+
+      - name: Transfer deployment files (staged, not yet active)
+        run: |
+          set -Eeuo pipefail
+          ssh_opts=(-i ~/.ssh/scout_deploy_key -p "${{ secrets.DEPLOY_PORT }}"
+                    -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/scout_known_hosts)
+          scp_opts=(-i ~/.ssh/scout_deploy_key -P "${{ secrets.DEPLOY_PORT }}"
+                    -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/scout_known_hosts)
+
+          ssh "${ssh_opts[@]}" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            'mkdir -p /opt/scout/release'
+
+          scp "${scp_opts[@]}" deploy/compose.server.yaml \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/scout/compose.server.yaml.new"
+          scp "${scp_opts[@]}" deploy/Caddyfile \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/scout/Caddyfile.new"
+          scp "${scp_opts[@]}" deploy/deploy.sh \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/scout/deploy.sh.new"
+          scp "${scp_opts[@]}" deploy/rollback.sh \
+            "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/opt/scout/rollback.sh.new"
+
+      - name: Promote scripts and run deploy
+        run: |
+          set -Eeuo pipefail
+          ssh_opts=(-i ~/.ssh/scout_deploy_key -p "${{ secrets.DEPLOY_PORT }}"
+                    -o StrictHostKeyChecking=yes -o UserKnownHostsFile=~/.ssh/scout_known_hosts)
+
+          ssh "${ssh_opts[@]}" "${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}" \
+            "set -Eeuo pipefail; \
+             chmod +x /opt/scout/deploy.sh.new /opt/scout/rollback.sh.new && \
+             mv -f /opt/scout/deploy.sh.new /opt/scout/deploy.sh && \
+             mv -f /opt/scout/rollback.sh.new /opt/scout/rollback.sh && \
+             /opt/scout/deploy.sh '${{ steps.release.outputs.tag }}'"
+
+      - name: Clean up temporary SSH credentials
+        if: always()
+        run: rm -f ~/.ssh/scout_deploy_key ~/.ssh/scout_known_hosts
+
+      - name: Job summary
+        if: always()
+        run: |
+          {
+            echo "### Deployment"
+            echo ""
+            echo "- Trigger: \`${{ github.event_name }}\`"
+            echo "- Release tag: \`${{ steps.release.outputs.tag }}\`"
+          } >> "$GITHUB_STEP_SUMMARY"

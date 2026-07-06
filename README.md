@@ -210,6 +210,131 @@ The production stack excludes MinIO. Object storage is entirely external and doe
 
 ---
 
+## Deploy to a VPS with Caddy and GHCR
+
+A reproducible path to run Scout on one small rented Linux server, with GitHub
+Actions building and publishing images and deploying automatically. This
+section is a concise reference; **follow
+[`deploystepbystep.md`](./deploystepbystep.md) (in Russian) for the complete,
+first-time operator procedure** — renting the server, SSH/Docker/firewall
+setup, DNS, object storage, GitHub configuration, seeding, and rollback.
+
+### Topology
+
+```
+Internet → Caddy (only public service, 80/443, automatic HTTPS)
+             → web (private, unprivileged Nginx + React)
+                 → api (private, Go) → external S3-compatible object storage
+```
+
+Caddy only replaces a bare reverse-proxy/TLS-termination role; it does not
+duplicate Nginx's SPA routing/asset caching or the Go API's `/api` contract,
+auth, or business logic, and it never proxies original image bytes. The
+required stack (Go backend, React/TypeScript frontend) is unchanged — Caddy
+is edge infrastructure, not an application-tier addition.
+
+### Prerequisites
+
+- A domain you control and a Linux VPS (Docker Engine 25+, Compose v2) with a
+  public IPv4 address and ports 22/80/443 reachable.
+- External S3-compatible object storage (AWS S3, Cloudflare R2, or a
+  separately hosted MinIO) — never hosted on the application server itself.
+- A GitHub repository with GHCR (GitHub Container Registry) access.
+- The committed `dataset/` (50 JPEGs + `predictions.db`) to upload once as the
+  initial seed source (see below).
+
+### Deployment files
+
+| File | Purpose |
+|---|---|
+| `.github/workflows/deploy.yml` | Builds/publishes GHCR images and deploys over SSH |
+| `deploy/Caddyfile` | Edge TLS/reverse-proxy configuration |
+| `deploy/compose.server.yaml` | Complete server-only topology (Caddy + web + api) |
+| `deploy/.env.production.example` | Placeholder for the real `/opt/scout/.env.production` |
+| `deploy/deploy.sh` | Validates, pulls, switches, health-checks, auto-restores on failure |
+| `deploy/rollback.sh` | Manually restores the previously recorded release |
+
+One-time server directory: `/opt/scout` (see the guide for exact layout and
+permissions).
+
+### GitHub configuration (names only — see the guide for values)
+
+- A GitHub Environment named `production` holding secrets `DEPLOY_HOST`,
+  `DEPLOY_PORT`, `DEPLOY_USER`, `DEPLOY_SSH_PRIVATE_KEY`,
+  `DEPLOY_SSH_KNOWN_HOSTS`, `VITE_SCOUT_API_KEY`.
+- A repository Actions variable `PRODUCTION_DEPLOY_ENABLED` (`true`/`false`).
+- Branch protection on `main`: require a pull request plus successful `CI`
+  and `Integration` checks before merge.
+
+### Automatic flow, kill switch, and manual first deploy
+
+Every commit that reaches `main` is deployed automatically **only after**
+both the existing `CI` and `Integration` workflows have completed
+successfully **for that exact commit SHA** — the deploy workflow reacts to
+`Integration` completing on `main`, then polls the Actions API for a matching
+successful `CI` run on the same SHA with a bounded timeout, and fails closed
+(never deploys) if that run is missing, still pending past the timeout,
+cancelled, skipped, or unsuccessful. Pull-request runs of either workflow
+never trigger a deployment. Both images are built and published for
+`linux/amd64` and `linux/arm64` under the same immutable `sha-<commit>` tag
+before deployment uses that tag.
+
+Automatic deployment is additionally gated by the repository Actions variable
+`PRODUCTION_DEPLOY_ENABLED`: while absent or not exactly `true`, the
+infrastructure workflow can be merged safely without deploying anywhere.
+`workflow_dispatch` remains available as an explicit recovery/first-deploy
+path — it takes an exact commit SHA (build + deploy) or an already-published
+immutable tag (deploy only), never the moving `main` tip. Set
+`PRODUCTION_DEPLOY_ENABLED=true` only after completing the first-deploy
+checklist in the guide (section 7.10).
+
+### Seeding
+
+If the seed profile hasn't been run on the server yet:
+
+```bash
+ssh <deploy-user>@<server> \
+  'cd /opt/scout && docker compose -f compose.server.yaml --env-file .env.production --profile seed run --rm seed'
+```
+
+Safe to run twice (idempotent per photo ID). See the guide for uploading the
+source JPEGs first and verifying the gallery afterward.
+
+### Operations
+
+```bash
+ssh <deploy-user>@<server> 'cd /opt/scout && docker compose -f compose.server.yaml --env-file .env.production ps'
+ssh <deploy-user>@<server> 'cd /opt/scout && docker compose -f compose.server.yaml --env-file .env.production logs --tail 100 api'
+ssh <deploy-user>@<server> '/opt/scout/rollback.sh'   # restores the last recorded previous release
+```
+
+Setting `PRODUCTION_DEPLOY_ENABLED=false` stops future automatic deployments
+without stopping the currently running application; a deployment already past
+the CI/Integration gate is not cancelled mid-flight (deployments are
+serialized, never run concurrently).
+
+### Security notes
+
+- Only Caddy is published on the server (`80`/`443`); `api`, `web`, and
+  Caddy's admin API are private to the Compose network.
+- Real secrets live only in `/opt/scout/.env.production` (mode `0600`, never
+  committed, printed, or uploaded as a CI artifact).
+- `VITE_SCOUT_API_KEY` is baked into the web bundle at build time and is
+  **browser-visible by design** (see "Security limitations" below) — it must
+  equal the server's `SCOUT_API_KEY`, but it is not real user authentication.
+  Rotating it requires a new web image plus a coordinated server env update.
+- Object storage stays private; only short-lived presigned URLs are ever
+  returned to the browser.
+- No production secret of any kind is stored in this repository.
+
+This task packages and documents the existing application; it does not change
+authentication, the API contract, database access, thumbnail logic, or local
+development topology. No real domain, certificate, or production deployment
+was exercised while writing this section — see `deploystepbystep.md` for the
+full, first-time walkthrough.
+
+---
+
 ## Environment variables
 
 | Variable | Required | Default | Description |
