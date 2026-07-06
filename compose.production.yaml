@@ -13,6 +13,11 @@ name: scout
 # Optional:
 #   SCOUT_S3_PUBLIC_ENDPOINT, SCOUT_S3_PUBLIC_SECURE  (if presigned hostname differs)
 #   SCOUT_WEB_PORT (default 8090), SCOUT_API_PORT (default 8080)
+#   SCOUT_WEB_BIND_ADDR (default 127.0.0.1) — the `web` port binds to loopback
+#   only by default, so this topology expects a reverse proxy or load balancer
+#   on the same host (or a port-forward from elsewhere) in front of it. Set
+#   SCOUT_WEB_BIND_ADDR=0.0.0.0 only if you intend to expose `web` directly to
+#   the network with no TLS-terminating proxy in front of it.
 
 services:
 
@@ -72,7 +77,7 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "${SCOUT_WEB_PORT:-8090}:8080"
+      - "${SCOUT_WEB_BIND_ADDR:-127.0.0.1}:${SCOUT_WEB_PORT:-8090}:8080"
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/ >/dev/null || exit 1"]
       interval: 15s
