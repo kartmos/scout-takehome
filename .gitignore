@@ -53,3 +53,11 @@ Thumbs.db
 *.bak
 
 TODO.md
+
+# ── Production deployment (deploy/) ─────────────────────────────────────────
+# The real server env file lives at /opt/scout/.env.production, never here;
+# these patterns only guard against an accidental local copy alongside the
+# example. deploy/.env.production.example is intentionally tracked.
+deploy/.env.production
+deploy/.env.production.local
+deploy/*.env.production

@@ -1,0 +1,44 @@
+# Caddy edge configuration for the Scout production server topology.
+#
+# Caddy is the only publicly reachable service. It terminates TLS (automatic
+# HTTPS via ACME) and reverse-proxies everything to the existing `web`
+# container (unprivileged Nginx + React), which in turn proxies `/api/` to
+# the `api` container on the private Compose network. Caddy does not
+# duplicate Nginx's SPA fallback, asset caching, or `/api` routing, and it
+# never serves object-storage bytes directly.
+#
+# {$SCOUT_DOMAIN} and {$SCOUT_ACME_EMAIL} are supplied as container
+# environment variables by deploy/compose.server.yaml, which fails Compose
+# interpolation early if either is missing from .env.production.
+{
+	# Bind the admin API to the container's own loopback only. It is never
+	# published as a Compose port, so it is unreachable from the host network
+	# or the internet; binding it explicitly (rather than relying only on the
+	# absent port mapping) keeps that intent visible here.
+	admin localhost:2019
+
+	email {$SCOUT_ACME_EMAIL}
+}
+
+{$SCOUT_DOMAIN} {
+	# Automatic HTTPS (ACME) is implicit for a bare-domain site address.
+	# Caddy also redirects plain HTTP on :80 to HTTPS by default; no manual
+	# redir block is required.
+
+	encode zstd gzip
+
+	# Structured JSON access log to stdout. Caddy's default access log
+	# format does not include request headers, cookies, or query strings,
+	# so it never captures Authorization headers, API keys, or signed
+	# object-storage URLs.
+	log {
+		output stdout
+		format json
+	}
+
+	# Proxy to the web container only. Standard forwarded headers
+	# (X-Forwarded-For, X-Forwarded-Proto, Host) use Caddy's safe defaults;
+	# no CORS or Basic Auth is added here — the application owns CORS and
+	# API-key auth.
+	reverse_proxy web:8080
+}
