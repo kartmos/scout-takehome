@@ -134,7 +134,7 @@ services:
     healthcheck:
       # Hits the admin API, which is bound to the container's own loopback
       # (see deploy/Caddyfile) and never published as a Compose port.
-      test: ["CMD", "wget", "-qO-", "http://localhost:2019/config/"]
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:2019/config/"]
       interval: 15s
       timeout: 5s
       start_period: 15s
